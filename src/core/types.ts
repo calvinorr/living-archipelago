@@ -24,6 +24,15 @@ export interface Vector2 {
 
 export type GoodCategory = 'food' | 'material' | 'tool' | 'luxury';
 
+/**
+ * Per-category market configuration (Track 05)
+ */
+export interface GoodMarketConfig {
+  priceElasticity: number; // Inventory pressure exponent (gamma)
+  velocityCoefficient: number; // Consumption velocity sensitivity
+  idealStockDays: number; // Days of consumption to target as ideal stock
+}
+
 export interface GoodDefinition {
   id: GoodId;
   name: string;
@@ -56,12 +65,28 @@ export interface EcosystemParams {
 // Population State (Section 2.2)
 // ============================================================================
 
+/**
+ * Labor sector types (Track 06)
+ */
+export type Sector = 'fishing' | 'forestry' | 'farming' | 'industry' | 'services';
+
 export interface LabourAllocation {
   fishing: number;
   forestry: number;
   farming: number;
   industry: number;
   services: number;
+}
+
+/**
+ * Labor market configuration (Track 06)
+ */
+export interface LaborConfig {
+  baseShares: Record<Sector, number>; // Default allocation without price signals
+  wageResponsiveness: number; // How strongly labor responds to wage differentials (1.0 default)
+  reallocationRate: number; // Max % change per hour (0.01 = 1%)
+  minSectorShare: number; // Minimum share any sector can have (0.02)
+  maxSectorShare: number; // Maximum share any sector can have (0.6)
 }
 
 export interface PopulationState {
@@ -131,6 +156,20 @@ export interface ShipState {
   cash: number;
   cargo: Map<GoodId, number>;
   location: ShipLocation;
+  lastVoyageCost?: number; // Cost of most recent completed voyage (Track 02)
+  cumulativeTransportCosts: number; // Total transport costs incurred (Track 02)
+}
+
+/**
+ * Transport cost breakdown for a voyage (Track 02)
+ */
+export interface TransportCostBreakdown {
+  fixedCost: number;
+  distanceCost: number;
+  volumeCost: number;
+  returnCost: number;
+  oneWayCost: number;
+  totalRoundTrip: number;
 }
 
 // ============================================================================
@@ -218,10 +257,53 @@ export interface SimulationConfig {
   healthPenaltyRate: number;
   populationDeclineThreshold: number;
 
+  // Consumption tuning (Track 01)
+  foodPriceElasticity: number; // Price elasticity for food (-0.3 = 30% demand drop per 100% price rise)
+  luxuryPriceElasticity: number; // Price elasticity for luxuries (-1.2 = more elastic)
+  foodSubstitutionElasticity: number; // How much demand shifts between fish/grain based on relative price
+  healthConsumptionFactor: number; // How much health affects consumption (0.3 = 30% reduction at 0 health)
+
+  // Population growth tuning (Track 04)
+  maxGrowthRate: number; // Max annual growth rate (0.005 = 0.5%)
+  maxDeclineRate: number; // Max annual decline rate (0.02 = 2%)
+  stableHealthThreshold: number; // Health at which growth = 0 (0.5)
+  optimalHealthThreshold: number; // Health for max growth (0.9)
+  crisisHealthThreshold: number; // Health for max decline (0.3)
+
   // Production tuning (Section 4.1)
   labourAlpha: number;
   toolBeta: number;
+
+  // Harvest-Production Coupling (Track 03)
+  collapseThreshold: number; // Stock ratio below which collapse occurs (0.1)
+  collapseFloor: number; // Minimum yield multiplier in collapse (0.05)
+  criticalThreshold: number; // Stock ratio where decline accelerates (0.3)
+  harvestEfficiency: number; // Fraction of harvest that becomes product (1.0 = perfect)
+
+  // Ecosystem Collapse (Track 07)
+  healthyThreshold: number; // Stock ratio for full productivity (0.6)
+  deadThreshold: number; // Stock ratio below which ecosystem is dead (0.02)
+  impairedRecoveryMultiplier: number; // Recovery rate when degraded (0.5)
+  collapsedRecoveryMultiplier: number; // Recovery rate when collapsed (0.1)
+  deadRecoveryRate: number; // Flat recovery rate when dead (0 = no natural recovery)
+
+  // Transport Costs (Track 02)
+  baseVoyageCost: number; // Fixed cost per voyage (default: 10)
+  costPerDistanceUnit: number; // Per-distance cost (default: 0.1)
+  perVolumeHandlingCost: number; // Per-cargo-volume cost (default: 0.05)
+  emptyReturnMultiplier: number; // Cost multiplier for empty return voyage (default: 0.5)
+
+  // Good-Specific Price Elasticity (Track 05)
+  goodMarketConfigs: Record<GoodCategory, GoodMarketConfig>;
+
+  // Wage-Based Labor Allocation (Track 06)
+  laborConfig: LaborConfig;
 }
+
+/**
+ * Ecosystem health classification (Track 07)
+ */
+export type EcosystemHealthState = 'healthy' | 'stressed' | 'degraded' | 'collapsed' | 'dead';
 
 // ============================================================================
 // Helper type for immutable state updates

@@ -18,7 +18,25 @@ import type {
   MarketState,
   ProductionParams,
   LabourAllocation,
+  Sector,
 } from './types.js';
+
+/**
+ * Mapping from labor sectors to produced goods (Track 06)
+ * Services sector doesn't produce a tradeable good
+ */
+export const SECTOR_TO_GOOD: Record<Sector, GoodId | null> = {
+  fishing: 'fish',
+  forestry: 'timber',
+  farming: 'grain',
+  industry: 'tools',
+  services: null, // Services don't produce a tradeable good
+};
+
+/**
+ * All labor sectors (Track 06)
+ */
+export const SECTORS: Sector[] = ['fishing', 'forestry', 'farming', 'industry', 'services'];
 
 /**
  * Default simulation configuration
@@ -40,9 +58,80 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   healthPenaltyRate: 0.1,
   populationDeclineThreshold: 0.3,
 
+  // Consumption tuning (Track 01)
+  foodPriceElasticity: -0.3, // 30% demand reduction per 100% price increase
+  luxuryPriceElasticity: -1.2, // Luxuries are more price-elastic
+  foodSubstitutionElasticity: 0.5, // Moderate substitution between fish/grain
+  healthConsumptionFactor: 0.3, // 30% consumption reduction at 0 health
+
+  // Population growth tuning (Track 04)
+  maxGrowthRate: 0.005, // 0.5% annual growth at optimal health
+  maxDeclineRate: 0.02, // 2% annual decline at crisis health
+  stableHealthThreshold: 0.5, // Health where population is stable
+  optimalHealthThreshold: 0.9, // Health for maximum growth
+  crisisHealthThreshold: 0.3, // Health for maximum decline
+
   // Production tuning
   labourAlpha: 0.7,
   toolBeta: 0.5,
+
+  // Harvest-Production Coupling (Track 03)
+  collapseThreshold: 0.1, // Below 10% stock: collapse zone
+  collapseFloor: 0.05, // Minimum 5% yield in collapse
+  criticalThreshold: 0.3, // Below 30% stock: accelerating decline
+  harvestEfficiency: 1.0, // 100% of harvest becomes product
+
+  // Ecosystem Collapse (Track 07)
+  healthyThreshold: 0.6, // Above 60% stock: full productivity
+  deadThreshold: 0.02, // Below 2% stock: ecosystem is dead
+  impairedRecoveryMultiplier: 0.5, // 50% recovery rate when degraded
+  collapsedRecoveryMultiplier: 0.1, // 10% recovery rate when collapsed
+  deadRecoveryRate: 0, // No natural recovery when dead
+
+  // Transport Costs (Track 02)
+  baseVoyageCost: 10, // Fixed cost per voyage
+  costPerDistanceUnit: 0.1, // Per-distance cost
+  perVolumeHandlingCost: 0.05, // Per-cargo-volume cost
+  emptyReturnMultiplier: 0.5, // Cost multiplier for empty return voyage
+
+  // Good-Specific Price Elasticity (Track 05)
+  goodMarketConfigs: {
+    food: {
+      priceElasticity: 0.6, // Essential goods: lower elasticity, more stable prices
+      velocityCoefficient: 0.4,
+      idealStockDays: 7,
+    },
+    material: {
+      priceElasticity: 0.9, // Moderate substitution
+      velocityCoefficient: 0.3,
+      idealStockDays: 14,
+    },
+    tool: {
+      priceElasticity: 0.8, // Investment-driven, somewhat elastic
+      velocityCoefficient: 0.2,
+      idealStockDays: 30,
+    },
+    luxury: {
+      priceElasticity: 1.4, // Highly discretionary, volatile prices
+      velocityCoefficient: 0.5,
+      idealStockDays: 21,
+    },
+  },
+
+  // Wage-Based Labor Allocation (Track 06)
+  laborConfig: {
+    baseShares: {
+      fishing: 0.20,
+      forestry: 0.15,
+      farming: 0.25,
+      industry: 0.15,
+      services: 0.25,
+    },
+    wageResponsiveness: 1.0, // Balanced response to wage differentials
+    reallocationRate: 0.01, // 1% max change per hour
+    minSectorShare: 0.02, // Minimum 2% in any sector
+    maxSectorShare: 0.60, // Maximum 60% in any sector
+  },
 };
 
 /**
@@ -341,6 +430,7 @@ export function createMVPShips(): Map<ShipId, ShipState> {
     cash: 500,
     cargo: new Map(),
     location: { kind: 'at_island', islandId: 'shoalhold' },
+    cumulativeTransportCosts: 0,
   });
 
   ships.set('sloop-2', {
@@ -352,6 +442,7 @@ export function createMVPShips(): Map<ShipId, ShipState> {
     cash: 400,
     cargo: new Map(),
     location: { kind: 'at_island', islandId: 'greenbarrow' },
+    cumulativeTransportCosts: 0,
   });
 
   return ships;
@@ -482,5 +573,7 @@ function cloneShip(ship: ShipState): ShipState {
             position: { ...ship.location.position },
             route: { ...ship.location.route },
           },
+    cumulativeTransportCosts: ship.cumulativeTransportCosts,
+    lastVoyageCost: ship.lastVoyageCost,
   };
 }

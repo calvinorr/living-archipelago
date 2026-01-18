@@ -12,6 +12,9 @@ import type {
   GoodDefinition,
   WorldEvent,
   Vector2,
+  TransportCostBreakdown,
+  SimulationConfig,
+  IslandId,
 } from '../core/types.js';
 
 /**
@@ -21,6 +24,60 @@ function distance(a: Vector2, b: Vector2): number {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
   return Math.sqrt(dx * dx + dy * dy);
+}
+
+/**
+ * Get distance between two islands by ID (Track 02)
+ */
+export function getDistanceBetweenIslands(
+  originId: IslandId,
+  destinationId: IslandId,
+  islands: Map<string, IslandState>
+): number {
+  const origin = islands.get(originId);
+  const destination = islands.get(destinationId);
+
+  if (!origin || !destination) {
+    return 0;
+  }
+
+  return distance(origin.position, destination.position);
+}
+
+/**
+ * Calculate transport cost for a voyage (Track 02)
+ *
+ * Cost components:
+ * 1. Fixed cost: port fees, loading/unloading
+ * 2. Distance cost: scales with voyage length
+ * 3. Volume cost: handling costs for cargo
+ * 4. Return cost: empty return voyage costs ~50% of loaded trip
+ */
+export function calculateTransportCost(
+  originId: IslandId,
+  destinationId: IslandId,
+  cargoVolume: number,
+  islands: Map<string, IslandState>,
+  config: SimulationConfig
+): TransportCostBreakdown {
+  const dist = getDistanceBetweenIslands(originId, destinationId, islands);
+
+  const fixedCost = config.baseVoyageCost;
+  const distanceCost = dist * config.costPerDistanceUnit;
+  const volumeCost = cargoVolume * config.perVolumeHandlingCost;
+  const oneWayCost = fixedCost + distanceCost + volumeCost;
+
+  // Return voyage (assuming empty unless planning round trip with backhaul)
+  const returnCost = dist * config.costPerDistanceUnit * config.emptyReturnMultiplier;
+
+  return {
+    fixedCost,
+    distanceCost,
+    volumeCost,
+    returnCost,
+    oneWayCost,
+    totalRoundTrip: oneWayCost + returnCost,
+  };
 }
 
 /**
@@ -227,19 +284,21 @@ export function startVoyage(
 }
 
 /**
- * Update ship state including movement and spoilage
+ * Update ship state including movement, spoilage, and transport costs (Track 02)
  */
 export function updateShip(
   ship: ShipState,
   islands: Map<string, IslandState>,
   goods: Map<GoodId, GoodDefinition>,
   events: WorldEvent[],
-  dt: number
+  dt: number,
+  config?: SimulationConfig
 ): {
   newShip: ShipState;
   arrived: boolean;
   arrivedAt: string | null;
   spoilageLoss: Map<GoodId, number>;
+  transportCost: number;
 } {
   // Apply spoilage to cargo
   const { newCargo, spoilageLoss } = applySpoilage(ship.cargo, goods, events, dt);
@@ -247,16 +306,44 @@ export function updateShip(
   // Update movement
   const { newLocation, arrived } = updateShipMovement(ship, islands, events, dt);
 
+  let transportCost = 0;
+  let lastVoyageCost = ship.lastVoyageCost;
+  let cumulativeTransportCosts = ship.cumulativeTransportCosts;
+  let cash = ship.cash;
+
+  // Deduct transport cost on voyage completion (Track 02)
+  if (arrived && ship.location.kind === 'at_sea' && config) {
+    const { route } = ship.location;
+    const cargoVolume = calculateCargoVolume(newCargo, goods);
+
+    // Calculate one-way cost (return cost is for planning, not deducted now)
+    const costBreakdown = calculateTransportCost(
+      route.fromIslandId,
+      route.toIslandId,
+      cargoVolume,
+      islands,
+      config
+    );
+
+    transportCost = costBreakdown.oneWayCost;
+    lastVoyageCost = transportCost;
+    cumulativeTransportCosts += transportCost;
+    cash = Math.max(0, cash - transportCost); // Prevent negative cash
+  }
+
   const newShip: ShipState = {
     ...ship,
     cargo: newCargo,
     location: newLocation,
+    cash,
+    lastVoyageCost,
+    cumulativeTransportCosts,
   };
 
   const arrivedAt =
     arrived && newLocation.kind === 'at_island' ? newLocation.islandId : null;
 
-  return { newShip, arrived, arrivedAt, spoilageLoss };
+  return { newShip, arrived, arrivedAt, spoilageLoss, transportCost };
 }
 
 /**

@@ -11,6 +11,7 @@ import type {
   GoodDefinition,
   WorldEvent,
   SimulationConfig,
+  GoodMarketConfig,
 } from '../core/types.js';
 
 const EPSILON = 0.001;
@@ -79,7 +80,17 @@ function getEventPriceModifier(
 }
 
 /**
- * Calculate raw price for a good
+ * Get market config for a good's category (Track 05)
+ */
+function getGoodMarketConfig(
+  goodDef: GoodDefinition,
+  config: SimulationConfig
+): GoodMarketConfig {
+  return config.goodMarketConfigs[goodDef.category];
+}
+
+/**
+ * Calculate raw price for a good (Track 05: uses per-category elasticity)
  * Formula: raw_price = base_price * pressure * velocity * event_modifiers
  */
 function calculateRawPrice(
@@ -92,11 +103,14 @@ function calculateRawPrice(
   islandId: string,
   config: SimulationConfig
 ): number {
-  const pressure = calculatePressure(currentStock, idealStock, config.priceGamma);
+  const goodConfig = getGoodMarketConfig(goodDef, config);
+
+  // Use per-category elasticity (Track 05)
+  const pressure = calculatePressure(currentStock, idealStock, goodConfig.priceElasticity);
   const velocity = calculateVelocity(
     consumptionRate,
     referenceConsumption,
-    config.priceVelocityK
+    goodConfig.velocityCoefficient
   );
   const eventMod = getEventPriceModifier(islandId, goodDef.id, events);
 
@@ -258,6 +272,7 @@ export function executeTrade(
 
 /**
  * Get price breakdown for debugging/UI ("why this price")
+ * Track 05: uses per-category elasticity
  */
 export function getPriceBreakdown(
   island: IslandState,
@@ -274,19 +289,22 @@ export function getPriceBreakdown(
   eventModifier: number;
   rawPrice: number;
   smoothedPrice: number;
+  priceElasticity: number;
 } {
+  const goodConfig = getGoodMarketConfig(goodDef, config);
   const currentStock = island.inventory.get(goodId) ?? 0;
   const idealStock = island.market.idealStock.get(goodId) ?? 100;
   const consumptionVelocity = island.market.consumptionVelocity.get(goodId) ?? 1;
   const currentPrice = island.market.prices.get(goodId) ?? goodDef.basePrice;
 
-  const pressure = calculatePressure(currentStock, idealStock, config.priceGamma);
+  // Use per-category elasticity (Track 05)
+  const pressure = calculatePressure(currentStock, idealStock, goodConfig.priceElasticity);
   const referenceConsumption =
     goodDef.category === 'food' ? island.population.size * 0.1 : 1;
   const velocity = calculateVelocity(
     consumptionVelocity,
     referenceConsumption,
-    config.priceVelocityK
+    goodConfig.velocityCoefficient
   );
   const eventModifier = getEventPriceModifier(island.id, goodId, events);
 
@@ -302,6 +320,7 @@ export function getPriceBreakdown(
     eventModifier,
     rawPrice,
     smoothedPrice,
+    priceElasticity: goodConfig.priceElasticity,
   };
 }
 

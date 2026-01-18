@@ -13,8 +13,8 @@ import type {
 import { SeededRNG, hashState } from './rng.js';
 import { cloneWorldState, tickToGameTime, DEFAULT_CONFIG } from './world.js';
 
-import { updateEcology } from '../systems/ecology.js';
-import { updateProduction } from '../systems/production.js';
+import { updateEcology, type HarvestData } from '../systems/ecology.js';
+import { updateProduction, type ProductionResult } from '../systems/production.js';
 import { updateConsumption, type ConsumptionResult } from '../systems/consumption.js';
 import { updatePopulation } from '../systems/population.js';
 import { updateMarket } from '../systems/market.js';
@@ -110,13 +110,10 @@ export class Simulation {
     // 2-6. Update each island
     // =========================================================================
     for (const [islandId, island] of next.islands) {
-      // 2. Ecology regeneration
-      const newEcosystem = updateEcology(island, next.events, dt);
-
-      // 3. Production
+      // 2. Production (now runs first to determine harvest - Track 03)
       const goodIds = Array.from(next.goods.keys());
-      const newInventoryAfterProduction = updateProduction(
-        { ...island, ecosystem: newEcosystem },
+      const productionResult: ProductionResult = updateProduction(
+        island,
         goodIds,
         this.config,
         next.events,
@@ -126,17 +123,22 @@ export class Simulation {
       // Track production
       const productionThisTick = new Map<GoodId, number>();
       for (const goodId of goodIds) {
-        const before = island.inventory.get(goodId) ?? 0;
-        const after = newInventoryAfterProduction.get(goodId) ?? 0;
-        productionThisTick.set(goodId, after - before);
+        productionThisTick.set(goodId, productionResult.produced.get(goodId) ?? 0);
       }
       metrics.production.set(islandId, productionThisTick);
+
+      // 3. Ecology regeneration (now uses harvest from production - Track 03)
+      const harvestData: HarvestData = {
+        fish: productionResult.harvested.get('fish') ?? 0,
+        timber: productionResult.harvested.get('timber') ?? 0,
+      };
+      const newEcosystem = updateEcology(island, harvestData, this.config, next.events, dt);
 
       // 4. Consumption
       const islandForConsumption: IslandState = {
         ...island,
         ecosystem: newEcosystem,
-        inventory: newInventoryAfterProduction,
+        inventory: productionResult.newInventory,
       };
       const consumptionResult = updateConsumption(
         islandForConsumption,
@@ -200,7 +202,7 @@ export class Simulation {
     }
 
     // =========================================================================
-    // 7-8. Ship movement, spoilage, and arrival
+    // 7-8. Ship movement, spoilage, arrival, and transport costs (Track 02)
     // =========================================================================
     for (const [shipId, ship] of next.ships) {
       const { newShip, arrived, arrivedAt, spoilageLoss: _spoilageLoss } = updateShip(
@@ -208,7 +210,8 @@ export class Simulation {
         next.islands,
         next.goods,
         next.events,
-        dt
+        dt,
+        this.config
       );
 
       if (arrived && arrivedAt) {

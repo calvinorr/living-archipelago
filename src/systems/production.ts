@@ -2,6 +2,7 @@
  * Production System
  * Handles good production based on labor, ecosystem, tools, and health
  * Based on 02_spec.md Section 4
+ * Updated with harvest-production coupling (Track 03)
  */
 
 import type {
@@ -10,6 +11,22 @@ import type {
   WorldEvent,
   SimulationConfig,
 } from '../core/types.js';
+
+import { calculateYieldMultiplier } from './ecology.js';
+
+/**
+ * Result of production calculation including harvest data (Track 03)
+ */
+export interface ProductionResult {
+  /** New inventory after production */
+  newInventory: Map<GoodId, number>;
+  /** Amount produced per good */
+  produced: Map<GoodId, number>;
+  /** Amount harvested from ecosystem per good (for fish/timber) */
+  harvested: Map<GoodId, number>;
+  /** Whether production was limited by ecosystem capacity */
+  constrained: Map<GoodId, boolean>;
+}
 
 /**
  * Calculate labor modifier
@@ -192,8 +209,38 @@ export function calculateProduction(
 }
 
 /**
- * Update island inventory with production for all goods
- * Returns new inventory map
+ * Check if a good is extractive (harvested from ecosystem stock)
+ */
+function isExtractiveGood(goodId: GoodId): boolean {
+  return goodId === 'fish' || goodId === 'timber';
+}
+
+/**
+ * Get ecosystem stock and capacity for extractive goods
+ */
+function getExtractiveStock(
+  goodId: GoodId,
+  island: IslandState
+): { stock: number; capacity: number } | null {
+  switch (goodId) {
+    case 'fish':
+      return {
+        stock: island.ecosystem.fishStock,
+        capacity: island.ecosystemParams.fishCapacity,
+      };
+    case 'timber':
+      return {
+        stock: island.ecosystem.forestBiomass,
+        capacity: island.ecosystemParams.forestCapacity,
+      };
+    default:
+      return null;
+  }
+}
+
+/**
+ * Update island inventory with production for all goods (Track 03)
+ * Returns ProductionResult with harvest data for ecosystem coupling
  */
 export function updateProduction(
   island: IslandState,
@@ -201,16 +248,59 @@ export function updateProduction(
   config: SimulationConfig,
   events: WorldEvent[],
   dt: number
-): Map<GoodId, number> {
+): ProductionResult {
   const newInventory = new Map(island.inventory);
+  const produced = new Map<GoodId, number>();
+  const harvested = new Map<GoodId, number>();
+  const constrained = new Map<GoodId, boolean>();
 
   for (const goodId of goods) {
-    const production = calculateProduction(island, goodId, config, events, dt);
+    // Calculate desired production (what labor/tools/health would produce)
+    const desiredProduction = calculateProduction(island, goodId, config, events, dt);
+
+    let actualProduction = desiredProduction;
+    let harvestAmount = 0;
+    let wasConstrained = false;
+
+    // For extractive goods, apply yield multiplier and cap by available stock
+    if (isExtractiveGood(goodId)) {
+      const stockInfo = getExtractiveStock(goodId, island);
+
+      if (stockInfo && stockInfo.capacity > 0) {
+        // Calculate yield multiplier based on ecosystem health
+        const yieldMult = calculateYieldMultiplier(
+          stockInfo.stock,
+          stockInfo.capacity,
+          config
+        );
+
+        // Maximum sustainable harvest for this tick
+        // Based on stock level and yield curve
+        const maxSustainableHarvest = stockInfo.stock * yieldMult * 0.1 * dt;
+
+        // Actual production is limited by what ecosystem can sustainably yield
+        if (desiredProduction > maxSustainableHarvest) {
+          actualProduction = maxSustainableHarvest;
+          wasConstrained = true;
+        }
+
+        // Harvest amount (what we take from ecosystem)
+        // With perfect efficiency, harvest = production
+        harvestAmount = actualProduction / config.harvestEfficiency;
+      }
+    }
+
+    // Update inventory
     const current = newInventory.get(goodId) ?? 0;
-    newInventory.set(goodId, current + production);
+    newInventory.set(goodId, current + actualProduction);
+
+    // Track results
+    produced.set(goodId, actualProduction);
+    harvested.set(goodId, harvestAmount);
+    constrained.set(goodId, wasConstrained);
   }
 
-  return newInventory;
+  return { newInventory, produced, harvested, constrained };
 }
 
 /**

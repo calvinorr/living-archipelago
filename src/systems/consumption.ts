@@ -2,6 +2,7 @@
  * Consumption System
  * Handles population food consumption and effects
  * Based on 02_spec.md Section 4.2
+ * Updated with price-elastic demand (Track 01)
  */
 
 import type {
@@ -17,6 +18,19 @@ export interface ConsumptionResult {
   foodConsumed: number;
   luxuryConsumed: number;
 }
+
+export interface FoodDemand {
+  grainDemand: number;
+  fishDemand: number;
+  totalDemand: number;
+}
+
+// Base prices for elasticity calculations (from MVP_GOODS in world.ts)
+const BASE_PRICES = {
+  fish: 8,
+  grain: 6,
+  luxuries: 30,
+};
 
 /**
  * Get event modifier for demand
@@ -47,61 +61,122 @@ function getDemandEventModifier(
 }
 
 /**
- * Calculate food needed for population
+ * Calculate price-elastic food demand with substitution effects (Track 01)
+ *
+ * Implements:
+ * 1. Health factor: sicker populations consume less (rationing)
+ * 2. Price elasticity: higher prices reduce demand
+ * 3. Substitution: when one food is expensive, demand shifts to the other
  */
-function calculateFoodNeeded(
-  populationSize: number,
-  foodPerCapita: number,
+export function calculateFoodDemand(
+  island: IslandState,
+  config: SimulationConfig,
   events: WorldEvent[],
-  islandId: string,
   dt: number
-): number {
-  const baseDemand = populationSize * foodPerCapita * dt;
-  // Average food demand modifier across food types
-  const fishMod = getDemandEventModifier(islandId, 'fish', events);
-  const grainMod = getDemandEventModifier(islandId, 'grain', events);
-  const avgMod = (fishMod + grainMod) / 2;
-  return baseDemand * avgMod;
+): FoodDemand {
+  const pop = island.population.size;
+  const baseNeed = pop * config.foodPerCapita * dt;
+
+  // Health factor: sicker populations ration consumption
+  // Range: (1 - healthFactor) to 1.0, e.g., 0.7 to 1.0 with default 0.3
+  const healthFactor =
+    1 - config.healthConsumptionFactor +
+    config.healthConsumptionFactor * island.population.health;
+
+  // Get current prices (fall back to base prices if not set)
+  const grainPrice = island.market.prices.get('grain') ?? BASE_PRICES.grain;
+  const fishPrice = island.market.prices.get('fish') ?? BASE_PRICES.fish;
+
+  // Apply event modifiers to demand
+  const grainEventMod = getDemandEventModifier(island.id, 'grain', events);
+  const fishEventMod = getDemandEventModifier(island.id, 'fish', events);
+
+  // Price elasticity effect: Q = Q_base * (P_ref / P_current)^elasticity
+  // With negative elasticity, higher prices reduce demand
+  // (P_ref / P_current)^(-0.3) means if price doubles, demand drops to ~0.81x
+  const grainElasticityMult = Math.pow(
+    BASE_PRICES.grain / grainPrice,
+    -config.foodPriceElasticity
+  );
+  const fishElasticityMult = Math.pow(
+    BASE_PRICES.fish / fishPrice,
+    -config.foodPriceElasticity
+  );
+
+  // Substitution effect: relative price determines share between foods
+  // When fish is expensive relative to grain, grain share increases
+  // Using tanh to smoothly bound the range
+  const relativePrice = (fishPrice / BASE_PRICES.fish) / (grainPrice / BASE_PRICES.grain);
+  const logRatio = Math.log(relativePrice) * config.foodSubstitutionElasticity;
+  // grainShare ranges from 0.25 to 0.75 based on relative prices
+  const grainShare = 0.5 + 0.25 * Math.tanh(logRatio);
+  const fishShare = 1 - grainShare;
+
+  // Calculate adjusted base need
+  const adjustedNeed = baseNeed * healthFactor;
+
+  // Final demand for each food type
+  const grainDemand = adjustedNeed * grainShare * grainElasticityMult * grainEventMod;
+  const fishDemand = adjustedNeed * fishShare * fishElasticityMult * fishEventMod;
+
+  return {
+    grainDemand: Math.max(0, grainDemand),
+    fishDemand: Math.max(0, fishDemand),
+    totalDemand: Math.max(0, grainDemand + fishDemand),
+  };
 }
 
 /**
- * Consume food from inventory
- * Prefers grain over fish (less spoilage), but will eat both
+ * Consume food from inventory based on elastic demand (Track 01)
+ * Attempts to fulfill grain and fish demands separately, with overflow handling
  */
-function consumeFood(
+function consumeFoodElastic(
   inventory: Map<GoodId, number>,
-  amountNeeded: number
+  demand: FoodDemand
 ): { consumed: number; remaining: Map<GoodId, number> } {
   const remaining = new Map(inventory);
   let consumed = 0;
 
-  // Food types in preference order (grain first - less spoilage)
-  const foodTypes: GoodId[] = ['grain', 'fish'];
+  const grainAvailable = remaining.get('grain') ?? 0;
+  const fishAvailable = remaining.get('fish') ?? 0;
 
-  for (const foodType of foodTypes) {
-    const available = remaining.get(foodType) ?? 0;
-    const toConsume = Math.min(available, amountNeeded - consumed);
+  // Try to fulfill each demand
+  const grainConsumed = Math.min(grainAvailable, demand.grainDemand);
+  const fishConsumed = Math.min(fishAvailable, demand.fishDemand);
 
-    if (toConsume > 0) {
-      remaining.set(foodType, available - toConsume);
-      consumed += toConsume;
-    }
+  // Handle unfulfilled demand: try to substitute
+  let grainDeficit = demand.grainDemand - grainConsumed;
+  let fishDeficit = demand.fishDemand - fishConsumed;
 
-    if (consumed >= amountNeeded) break;
-  }
+  // If grain is short, try to get more fish
+  const extraFishAvailable = fishAvailable - fishConsumed;
+  const fishSubstitution = Math.min(extraFishAvailable, grainDeficit);
+
+  // If fish is short, try to get more grain
+  const extraGrainAvailable = grainAvailable - grainConsumed;
+  const grainSubstitution = Math.min(extraGrainAvailable, fishDeficit);
+
+  // Final consumption
+  const finalGrainConsumed = grainConsumed + grainSubstitution;
+  const finalFishConsumed = fishConsumed + fishSubstitution;
+
+  remaining.set('grain', grainAvailable - finalGrainConsumed);
+  remaining.set('fish', fishAvailable - finalFishConsumed);
+
+  consumed = finalGrainConsumed + finalFishConsumed;
 
   return { consumed, remaining };
 }
 
 /**
- * Optional luxury consumption
+ * Optional luxury consumption with price elasticity (Track 01)
  * Provides small health/stability bonus
  */
 function consumeLuxuries(
   inventory: Map<GoodId, number>,
-  populationSize: number,
+  island: IslandState,
+  config: SimulationConfig,
   events: WorldEvent[],
-  islandId: string,
   dt: number
 ): { consumed: number; remaining: Map<GoodId, number> } {
   const remaining = new Map(inventory);
@@ -111,11 +186,30 @@ function consumeLuxuries(
     return { consumed: 0, remaining };
   }
 
-  // Luxury consumption is optional, rate based on events
-  const demandMod = getDemandEventModifier(islandId, 'luxuries', events);
+  // Get current luxury price
+  const luxuryPrice = island.market.prices.get('luxuries') ?? BASE_PRICES.luxuries;
+
+  // Event modifier
+  const demandMod = getDemandEventModifier(island.id, 'luxuries', events);
+
+  // Price elasticity: luxuries are highly elastic (default -1.2)
+  // Higher prices significantly reduce demand
+  const elasticityMult = Math.pow(
+    BASE_PRICES.luxuries / luxuryPrice,
+    -config.luxuryPriceElasticity
+  );
+
+  // Health factor affects luxury consumption too (sick people buy less luxuries)
+  const healthFactor =
+    1 - config.healthConsumptionFactor +
+    config.healthConsumptionFactor * island.population.health;
+
+  // Base luxury consumption rate
   const baseRate = 0.01; // 1% of population per tick
-  const desired = populationSize * baseRate * demandMod * dt;
-  const consumed = Math.min(available, desired);
+  const desired =
+    island.population.size * baseRate * demandMod * elasticityMult * healthFactor * dt;
+
+  const consumed = Math.min(available, Math.max(0, desired));
 
   remaining.set('luxuries', available - consumed);
   return { consumed, remaining };
@@ -124,6 +218,7 @@ function consumeLuxuries(
 /**
  * Update island inventory based on consumption
  * Returns consumption result including deficits
+ * Updated to use price-elastic demand (Track 01)
  */
 export function updateConsumption(
   island: IslandState,
@@ -131,28 +226,23 @@ export function updateConsumption(
   events: WorldEvent[],
   dt: number
 ): ConsumptionResult {
-  const foodNeeded = calculateFoodNeeded(
-    island.population.size,
-    config.foodPerCapita,
-    events,
-    island.id,
-    dt
-  );
+  // Calculate price-elastic food demand with substitution
+  const foodDemand = calculateFoodDemand(island, config, events, dt);
 
-  // Consume food
-  const { consumed: foodConsumed, remaining: afterFood } = consumeFood(
+  // Consume food based on elastic demand
+  const { consumed: foodConsumed, remaining: afterFood } = consumeFoodElastic(
     island.inventory,
-    foodNeeded
+    foodDemand
   );
 
-  const foodDeficit = Math.max(0, foodNeeded - foodConsumed);
+  const foodDeficit = Math.max(0, foodDemand.totalDemand - foodConsumed);
 
-  // Consume luxuries (optional)
+  // Consume luxuries (optional) with price elasticity
   const { consumed: luxuryConsumed, remaining: finalInventory } = consumeLuxuries(
     afterFood,
-    island.population.size,
+    island,
+    config,
     events,
-    island.id,
     dt
   );
 
