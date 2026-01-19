@@ -9,6 +9,8 @@ import type {
   IslandState,
   GoodId,
   SimulationConfig,
+  ShipyardId,
+  ShipId,
 } from './types.js';
 import { SeededRNG, hashState } from './rng.js';
 import { cloneWorldState, tickToGameTime, DEFAULT_CONFIG } from './world.js';
@@ -20,6 +22,9 @@ import { updatePopulation } from '../systems/population.js';
 import { updateMarket } from '../systems/market.js';
 import { updateShip } from '../systems/shipping.js';
 import { generateEvents, updateEvents } from '../systems/events.js';
+import { updateCrew, type CrewUpdateResult } from '../systems/crew.js';
+import { updateAllShipyards } from '../systems/shipyard.js';
+import { updateBuildingMaintenance } from '../systems/buildings.js';
 
 /**
  * Tick metrics for logging/debugging
@@ -33,6 +38,8 @@ export interface TickMetrics {
   arrivals: Array<{ shipId: string; islandId: string }>;
   newEvents: string[];
   expiredEvents: string[];
+  crewUpdates: Map<string, CrewUpdateResult>;
+  shipyardCompletions: Array<{ shipyardId: ShipyardId; shipId: ShipId; shipName: string }>;
 }
 
 /**
@@ -55,6 +62,21 @@ export class Simulation {
    */
   getState(): WorldState {
     return this.state;
+  }
+
+  /**
+   * Update world state (used for applying agent actions)
+   * Only modifies ships and islands since agent actions only affect those
+   */
+  updateState(newState: WorldState): void {
+    // Copy over ships and islands from the new state
+    // This preserves the tick, events, and other simulation state
+    // while applying agent action results (trades, navigation)
+    this.state = {
+      ...this.state,
+      ships: newState.ships,
+      islands: newState.islands,
+    };
   }
 
   /**
@@ -85,6 +107,8 @@ export class Simulation {
       arrivals: [],
       newEvents: [],
       expiredEvents: [],
+      crewUpdates: new Map(),
+      shipyardCompletions: [],
     };
 
     // Clone state for immutable update
@@ -202,7 +226,15 @@ export class Simulation {
     }
 
     // =========================================================================
-    // 7-8. Ship movement, spoilage, arrival, and transport costs (Track 02)
+    // 7. Building maintenance - condition decay and upkeep
+    // =========================================================================
+    for (const [islandId, island] of next.islands) {
+      const { newIsland } = updateBuildingMaintenance(island, this.config, dt);
+      next.islands.set(islandId, newIsland);
+    }
+
+    // =========================================================================
+    // 8-9. Ship movement, spoilage, arrival, and transport costs (Track 02)
     // =========================================================================
     for (const [shipId, ship] of next.ships) {
       const { newShip, arrived, arrivedAt, spoilageLoss: _spoilageLoss } = updateShip(
@@ -222,7 +254,62 @@ export class Simulation {
     }
 
     // =========================================================================
-    // 9. Update RNG state and compute hash
+    // 10. Ship crew system - wages, morale, and desertion
+    // =========================================================================
+    for (const [shipId, ship] of next.ships) {
+      // Get the island if ship is docked (for desertion to return to population)
+      let currentIsland: IslandState | null = null;
+      if (ship.location.kind === 'at_island') {
+        currentIsland = next.islands.get(ship.location.islandId) ?? null;
+      }
+
+      const crewResult = updateCrew(ship, currentIsland, this.config, dt);
+      metrics.crewUpdates.set(shipId, crewResult);
+
+      // Update ship with new crew state
+      next.ships.set(shipId, crewResult.newShip);
+
+      // Update island population if crew deserted at island
+      if (crewResult.newIsland && ship.location.kind === 'at_island') {
+        next.islands.set(ship.location.islandId, crewResult.newIsland);
+      }
+    }
+
+    // =========================================================================
+    // 11. Shipyard system - process build orders and complete ships
+    // =========================================================================
+    const shipyardResult = updateAllShipyards(next, dt);
+    next.shipyards = shipyardResult.newShipyards;
+    // Apply any island inventory changes from shipyards
+    for (const [islandId, island] of shipyardResult.newIslands) {
+      const currentIsland = next.islands.get(islandId);
+      if (currentIsland) {
+        // Merge inventory changes while preserving other island state changes
+        next.islands.set(islandId, {
+          ...currentIsland,
+          inventory: island.inventory,
+        });
+      }
+    }
+    // Add newly completed ships
+    for (const [shipId, ship] of shipyardResult.newShips) {
+      next.ships.set(shipId, ship);
+      // Update the owner's agent state to include the new ship
+      const agent = next.agents.get(ship.ownerId);
+      if (agent) {
+        next.agents.set(ship.ownerId, {
+          ...agent,
+          assets: {
+            ...agent.assets,
+            shipIds: [...agent.assets.shipIds, shipId],
+          },
+        });
+      }
+    }
+    metrics.shipyardCompletions = shipyardResult.completions;
+
+    // =========================================================================
+    // 12. Update RNG state and compute hash
     // =========================================================================
     next.rngState = this.rng.getState().s0;
     metrics.stateHash = hashState(next);
@@ -264,6 +351,11 @@ export class Simulation {
       id: string;
       location: string;
       cash: number;
+      crew: {
+        count: number;
+        capacity: number;
+        morale: number;
+      };
     }>;
     activeEvents: string[];
   } {
@@ -287,6 +379,11 @@ export class Simulation {
           ? ship.location.islandId
           : `At sea → ${ship.location.route.toIslandId}`,
       cash: Math.round(ship.cash),
+      crew: {
+        count: ship.crew.count,
+        capacity: ship.crew.capacity,
+        morale: Math.round(ship.crew.morale * 100) / 100,
+      },
     }));
 
     const activeEvents = this.state.events

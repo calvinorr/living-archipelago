@@ -388,25 +388,57 @@ export class TraderAgent extends BaseAgent {
 
 /**
  * Create a trader agent with mock LLM for testing
+ *
+ * The mock agent returns realistic trade routes based on the MVP archipelago:
+ * - Shoalhold: Fishing island (abundant fish, needs grain)
+ * - Greenbarrow: Agricultural island (abundant grain, needs fish)
+ * - Timberwake: Forest island (abundant timber, needs food)
  */
 export function createMockTraderAgent(
   id: AgentId,
   name: string,
   initialAssets: { cash: number; shipIds: string[] },
-  mockResponses?: (prompt: string) => string
+  mockResponses?: (prompt: string) => string,
+  config?: Partial<TraderAgentConfig>
 ): TraderAgent {
+  // Define realistic trade routes based on island specializations
+  // These routes exploit natural arbitrage between specialized islands
+  const mockTradeRoutes = [
+    {
+      // Fish is cheap at Shoalhold (fishing island), expensive elsewhere
+      from: 'shoalhold',
+      to: 'greenbarrow',
+      goods: ['fish'],
+      priority: 1,
+    },
+    {
+      // Grain is cheap at Greenbarrow (agricultural), expensive elsewhere
+      from: 'greenbarrow',
+      to: 'timberwake',
+      goods: ['grain'],
+      priority: 2,
+    },
+    {
+      // Timber is cheap at Timberwake (forest), expensive elsewhere
+      from: 'timberwake',
+      to: 'shoalhold',
+      goods: ['timber'],
+      priority: 3,
+    },
+  ];
+
   const defaultResponse = () =>
     JSON.stringify({
-      analysis: 'Mock analysis',
+      analysis: 'Mock analysis: Exploiting natural island specialization for arbitrage opportunities',
       strategy: {
         primaryGoal: 'profit',
-        targetRoutes: [],
+        targetRoutes: mockTradeRoutes,
         riskTolerance: 'medium',
       },
-      reasoning: 'Mock reasoning',
+      reasoning: 'Trade routes follow island specializations: fish from Shoalhold, grain from Greenbarrow, timber from Timberwake',
     });
 
   const mockClient = createMockLLMClient(mockResponses ?? defaultResponse);
 
-  return new TraderAgent(id, name, mockClient, initialAssets, { debug: true });
+  return new TraderAgent(id, name, mockClient, initialAssets, { debug: true, ...config });
 }
