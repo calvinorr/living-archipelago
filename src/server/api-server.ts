@@ -15,8 +15,9 @@ import { TraderAgent, createMockTraderAgent } from '../agents/traders/trader-age
 import { LLMClient } from '../llm/client.js';
 import { llmMetrics } from '../llm/metrics.js';
 import { serializeWorldState } from './state-serializer.js';
-import { createDatabase, SimulationDatabase, getTradeStats, getLLMUsage, getEcosystemHealth, getPriceHistory } from '../storage/index.js';
+import { createDatabase, SimulationDatabase, getTradeStats, getLLMUsage, getEcosystemHealth, getPriceHistory, getPriceVolatility, getPopulationTrends } from '../storage/index.js';
 import type { TradeRecord } from '../storage/index.js';
+import { getRunSummary, getEcosystemReports, getMarketEfficiencyMetrics, getTradeRouteAnalysis } from '../storage/analyst-queries.js';
 
 // ============================================================================
 // Types
@@ -546,6 +547,128 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
     const prices = getPriceHistory(state.database, runId, islandId, goodId);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ prices }));
+    return;
+  }
+
+  // ============================================================================
+  // Analyst API Endpoints
+  // ============================================================================
+
+  // Get all runs for analyst
+  if (url.pathname === '/api/analyst/runs' && req.method === 'GET') {
+    if (!state.database) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Database not enabled' }));
+      return;
+    }
+    const runs = state.database.getAllRuns();
+    const summaries = runs.map(run => ({
+      id: run.id,
+      seed: run.seed,
+      startedAt: run.startedAt.toISOString(),
+      endedAt: run.endedAt?.toISOString() || null,
+    }));
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ runs: summaries }));
+    return;
+  }
+
+  // Get run summary for analyst
+  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+\/summary$/) && req.method === 'GET') {
+    if (!state.database) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Database not enabled' }));
+      return;
+    }
+    const runId = parseInt(url.pathname.split('/')[4], 10);
+    const summary = getRunSummary(state.database, runId);
+    if (!summary) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Run not found' }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ summary }));
+    return;
+  }
+
+  // Get ecosystem reports for analyst
+  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+\/ecosystem$/) && req.method === 'GET') {
+    if (!state.database) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Database not enabled' }));
+      return;
+    }
+    const runId = parseInt(url.pathname.split('/')[4], 10);
+    const reports = getEcosystemReports(state.database, runId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ reports }));
+    return;
+  }
+
+  // Get market efficiency metrics for analyst
+  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+\/market$/) && req.method === 'GET') {
+    if (!state.database) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Database not enabled' }));
+      return;
+    }
+    const runId = parseInt(url.pathname.split('/')[4], 10);
+    const metrics = getMarketEfficiencyMetrics(state.database, runId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ metrics }));
+    return;
+  }
+
+  // Get trade route analysis for analyst
+  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+\/routes$/) && req.method === 'GET') {
+    if (!state.database) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Database not enabled' }));
+      return;
+    }
+    const runId = parseInt(url.pathname.split('/')[4], 10);
+    const routes = getTradeRouteAnalysis(state.database, runId);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ routes }));
+    return;
+  }
+
+  // Get full analysis data for analyst
+  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+\/full$/) && req.method === 'GET') {
+    if (!state.database) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Database not enabled' }));
+      return;
+    }
+    const runId = parseInt(url.pathname.split('/')[4], 10);
+    const summary = getRunSummary(state.database, runId);
+    if (!summary) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Run not found' }));
+      return;
+    }
+    const ecosystem = getEcosystemReports(state.database, runId);
+    const market = getMarketEfficiencyMetrics(state.database, runId);
+    const routes = getTradeRouteAnalysis(state.database, runId);
+    const trades = getTradeStats(state.database, runId);
+    const prices = getPriceVolatility(state.database, runId);
+    const population = getPopulationTrends(state.database, runId);
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      summary,
+      ecosystem,
+      market,
+      routes,
+      trades: {
+        ...trades,
+        tradesByGood: Object.fromEntries(trades.tradesByGood),
+        tradesByIsland: Object.fromEntries(trades.tradesByIsland),
+      },
+      prices: Object.fromEntries(prices),
+      population: Object.fromEntries(population),
+    }));
     return;
   }
 
