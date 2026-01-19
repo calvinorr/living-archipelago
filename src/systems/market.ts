@@ -14,6 +14,8 @@ import type {
   GoodMarketConfig,
 } from '../core/types.js';
 
+import { getMarketEffect } from './buildings.js';
+
 const EPSILON = 0.001;
 
 /**
@@ -143,6 +145,9 @@ function updateVelocity(
 /**
  * Update market state for an island
  * Returns new market state
+ *
+ * Market buildings provide price stabilization, reducing volatility by
+ * pulling prices toward the base price.
  */
 export function updateMarket(
   island: IslandState,
@@ -155,6 +160,10 @@ export function updateMarket(
   const newPrices = new Map<GoodId, number>();
   const newMomentum = new Map<GoodId, number>();
   const newVelocity = new Map<GoodId, number>();
+
+  // Get market building effect for price stabilization
+  const marketEffect = getMarketEffect(island, config.buildingsConfig);
+  const priceStabilization = marketEffect.priceStabilization;
 
   for (const [goodId, goodDef] of goods) {
     const currentStock = island.inventory.get(goodId) ?? 0;
@@ -183,14 +192,18 @@ export function updateMarket(
       config
     );
 
-    // Apply smoothing
-    const smoothedPrice = smoothPrice(currentPrice, rawPrice, config.priceLambda);
+    // Apply market building stabilization: blend raw price toward base price
+    // priceStabilization of 0 = no effect, 0.6 = 60% pull toward base price
+    const stabilizedRawPrice = rawPrice * (1 - priceStabilization) + goodDef.basePrice * priceStabilization;
 
-    // Clamp to bounds
-    const finalPrice = Math.max(
-      config.minPrice,
-      Math.min(config.maxPrice, smoothedPrice)
-    );
+    // Apply smoothing
+    const smoothedPrice = smoothPrice(currentPrice, stabilizedRawPrice, config.priceLambda);
+
+    // Clamp to bounds (both global and per-good based on base price)
+    // Per-good bounds: 0.2x to 20x base price prevents extreme divergence
+    const goodMinPrice = Math.max(config.minPrice, goodDef.basePrice * 0.2);
+    const goodMaxPrice = Math.min(config.maxPrice, goodDef.basePrice * 20);
+    const finalPrice = Math.max(goodMinPrice, Math.min(goodMaxPrice, smoothedPrice));
 
     newPrices.set(goodId, finalPrice);
 

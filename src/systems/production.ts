@@ -13,6 +13,7 @@ import type {
 } from '../core/types.js';
 
 import { calculateYieldMultiplier } from './ecology.js';
+import { getWorkshopEffect } from './buildings.js';
 
 /**
  * Result of production calculation including harvest data (Track 03)
@@ -44,13 +45,13 @@ function labourModifier(
 
 /**
  * Calculate ecosystem modifier
- * Formula: 0.2 + 0.8 * (resource / resource_ref)
- * Prevents total zeroing of production
+ * Formula: 0.05 + 0.95 * (resource / resource_ref)
+ * Low floor allows near-collapse when ecosystem is depleted
  */
 function ecosystemModifier(resourceLevel: number, capacity: number): number {
-  if (capacity <= 0) return 0.2;
+  if (capacity <= 0) return 0.05;
   const ratio = Math.min(resourceLevel / capacity, 1);
-  return 0.2 + 0.8 * ratio;
+  return 0.05 + 0.95 * ratio;  // Floor lowered from 0.2 to 0.05
 }
 
 /**
@@ -69,10 +70,11 @@ function toolModifier(
 
 /**
  * Calculate health modifier
- * Formula: 0.5 + 0.5 * health
+ * Formula: 0.2 + 0.8 * health
+ * Low floor means sick populations are severely impacted
  */
 function healthModifier(health: number): number {
-  return 0.5 + 0.5 * health;
+  return 0.2 + 0.8 * health;  // Floor lowered from 0.5 to 0.2
 }
 
 /**
@@ -163,7 +165,9 @@ function getProductionEventModifier(
 
 /**
  * Calculate effective production for a single good
- * Formula: base_rate * labour_mod * ecosystem_mod * tool_mod * health_mod * event_mod
+ * Formula: base_rate * labour_mod * ecosystem_mod * tool_mod * health_mod * event_mod * building_mod
+ *
+ * Workshop buildings provide a bonus to tool production.
  */
 export function calculateProduction(
   island: IslandState,
@@ -202,8 +206,15 @@ export function calculateProduction(
   // Get event modifier
   const eventMod = getProductionEventModifier(island.id, goodId, events);
 
+  // Get building modifier (workshop bonus for tools)
+  let buildingMod = 1;
+  if (goodId === 'tools') {
+    const workshopEffect = getWorkshopEffect(island, config.buildingsConfig);
+    buildingMod = workshopEffect.toolProductionBonus;
+  }
+
   // Calculate total production
-  const production = baseRate * labourMod * ecoMod * toolMod * healthMod * eventMod * dt;
+  const production = baseRate * labourMod * ecoMod * toolMod * healthMod * eventMod * buildingMod * dt;
 
   return Math.max(0, production);
 }
@@ -318,6 +329,7 @@ export function getProductionBreakdown(
   toolModifier: number;
   healthModifier: number;
   eventModifier: number;
+  buildingModifier: number;
   effectiveRate: number;
 } {
   const baseRate = island.productionParams.baseRate.get(goodId) ?? 0;
@@ -343,6 +355,13 @@ export function getProductionBreakdown(
   const healthMod = healthModifier(island.population.health);
   const eventMod = getProductionEventModifier(island.id, goodId, events);
 
+  // Get building modifier (workshop bonus for tools)
+  let buildingMod = 1;
+  if (goodId === 'tools') {
+    const workshopEffect = getWorkshopEffect(island, config.buildingsConfig);
+    buildingMod = workshopEffect.toolProductionBonus;
+  }
+
   return {
     baseRate,
     labourModifier: labourMod,
@@ -350,6 +369,7 @@ export function getProductionBreakdown(
     toolModifier: toolMod,
     healthModifier: healthMod,
     eventModifier: eventMod,
-    effectiveRate: baseRate * labourMod * ecoMod * toolMod * healthMod * eventMod,
+    buildingModifier: buildingMod,
+    effectiveRate: baseRate * labourMod * ecoMod * toolMod * healthMod * eventMod * buildingMod,
   };
 }

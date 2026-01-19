@@ -238,7 +238,7 @@ export function updateConsumption(
   const foodDeficit = Math.max(0, foodDemand.totalDemand - foodConsumed);
 
   // Consume luxuries (optional) with price elasticity
-  const { consumed: luxuryConsumed, remaining: finalInventory } = consumeLuxuries(
+  const { consumed: luxuryConsumed, remaining: afterLuxuries } = consumeLuxuries(
     afterFood,
     island,
     config,
@@ -246,8 +246,11 @@ export function updateConsumption(
     dt
   );
 
+  // No inventory floor - goods can run out completely
+  // This creates real scarcity and proper price signals
+
   return {
-    newInventory: finalInventory,
+    newInventory: afterLuxuries,
     foodDeficit,
     foodConsumed,
     luxuryConsumed,
