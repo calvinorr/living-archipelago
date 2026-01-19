@@ -188,6 +188,13 @@ export class SimulationDatabase {
   }
 
   /**
+   * Get the underlying database connection for direct queries
+   */
+  getDb(): Database.Database {
+    return this.db;
+  }
+
+  /**
    * Prepare statements for repeated use
    */
   private prepareStatements(): void {

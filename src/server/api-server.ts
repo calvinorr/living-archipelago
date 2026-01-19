@@ -573,12 +573,27 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
       return;
     }
     const runs = state.database.getAllRuns();
-    const summaries = runs.map(run => ({
-      id: run.id,
-      seed: run.seed,
-      startedAt: run.startedAt.toISOString(),
-      endedAt: run.endedAt?.toISOString() || null,
-    }));
+
+    // Get duration (max tick) for each run
+    const summaries = runs.map(run => {
+      // Query max tick for this run from snapshots
+      let duration = 0;
+      try {
+        const db = state.database!.getDb();
+        const result = db.prepare('SELECT MAX(tick) as maxTick FROM snapshots WHERE run_id = ?').get(run.id) as { maxTick: number | null } | undefined;
+        duration = result?.maxTick ?? 0;
+      } catch {
+        duration = 0;
+      }
+
+      return {
+        id: run.id,
+        seed: run.seed,
+        startedAt: run.startedAt.toISOString(),
+        endedAt: run.endedAt?.toISOString() || null,
+        duration,
+      };
+    });
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ runs: summaries }));
     return;

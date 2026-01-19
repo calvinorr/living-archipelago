@@ -140,8 +140,8 @@ export interface RunListItem {
   id: number;
   seed: number;
   startedAt: string;
+  endedAt: string | null;
   duration: number;
-  finalTick: number;
 }
 
 // ============================================================================
