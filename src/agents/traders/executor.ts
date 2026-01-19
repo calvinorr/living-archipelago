@@ -29,8 +29,8 @@ export interface ExecutorConfig {
 
 const DEFAULT_CONFIG: ExecutorConfig = {
   cashReserve: 0.1, // Keep 10% cash reserve
-  minProfitMargin: 0.1, // 10% minimum
-  maxCargoFill: 0.8, // Fill 80% of capacity max
+  minProfitMargin: 0.05, // 5% minimum (was 10% - too restrictive)
+  maxCargoFill: 0.9, // Fill 90% of capacity max (was 80%)
   sellFirst: true,
 };
 
@@ -199,19 +199,29 @@ export class Executor {
       if (isDestination) return true;
     }
 
-    // Check if price is above average across islands
-    const prices: number[] = [];
+    // Find lowest price across islands (where we likely bought)
+    let lowestPrice = price;
+    let highestPrice = price;
     for (const i of observation.islands.values()) {
       const p = i.prices.get(goodId);
-      if (p && p > 0) prices.push(p);
+      if (p && p > 0) {
+        if (p < lowestPrice) lowestPrice = p;
+        if (p > highestPrice) highestPrice = p;
+      }
     }
 
-    if (prices.length < 2) return true; // Only option
+    // Sell if current price is significantly above the lowest (arbitrage profit)
+    const marginFromLowest = (price - lowestPrice) / lowestPrice;
+    if (marginFromLowest >= this.config.minProfitMargin) return true;
 
-    const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
-    const margin = (price - avgPrice) / avgPrice;
+    // Also sell if we're at one of the higher-priced islands (top 50% of price range)
+    const priceRange = highestPrice - lowestPrice;
+    if (priceRange > 0) {
+      const pricePosition = (price - lowestPrice) / priceRange;
+      if (pricePosition >= 0.4) return true; // Sell if in top 60% of price range
+    }
 
-    return margin >= this.config.minProfitMargin;
+    return false;
   }
 
   /**

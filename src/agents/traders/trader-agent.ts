@@ -402,28 +402,64 @@ export function createMockTraderAgent(
   config?: Partial<TraderAgentConfig>
 ): TraderAgent {
   // Define realistic trade routes based on island specializations
-  // These routes exploit natural arbitrage between specialized islands
+  // Routes form multiple cycles to ensure goods flow to all islands
   const mockTradeRoutes = [
+    // Primary food distribution - CRITICAL for population health
     {
-      // Fish is cheap at Shoalhold (fishing island), expensive elsewhere
+      // Fish from fishing island to farming island
       from: 'shoalhold',
       to: 'greenbarrow',
       goods: ['fish'],
       priority: 1,
     },
     {
-      // Grain is cheap at Greenbarrow (agricultural), expensive elsewhere
+      // Fish AND Grain to timber island (needs food!)
+      from: 'shoalhold',
+      to: 'timberwake',
+      goods: ['fish'],
+      priority: 1, // High priority - Timberwake needs food
+    },
+    {
+      // Grain from farming island to timber island
       from: 'greenbarrow',
       to: 'timberwake',
       goods: ['grain'],
-      priority: 2,
+      priority: 1, // High priority - Timberwake needs food
     },
     {
-      // Timber is cheap at Timberwake (forest), expensive elsewhere
+      // Grain to fishing island
+      from: 'greenbarrow',
+      to: 'shoalhold',
+      goods: ['grain'],
+      priority: 2,
+    },
+    // Material trade
+    {
+      // Timber from forest island to farming island
+      from: 'timberwake',
+      to: 'greenbarrow',
+      goods: ['timber'],
+      priority: 3,
+    },
+    {
+      // Timber from forest island to fishing island
       from: 'timberwake',
       to: 'shoalhold',
       goods: ['timber'],
       priority: 3,
+    },
+    // Tools distribution (produced at industrial centers)
+    {
+      from: 'greenbarrow',
+      to: 'timberwake',
+      goods: ['tools'],
+      priority: 4,
+    },
+    {
+      from: 'greenbarrow',
+      to: 'shoalhold',
+      goods: ['tools'],
+      priority: 4,
     },
   ];
 

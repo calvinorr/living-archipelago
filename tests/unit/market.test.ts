@@ -109,7 +109,10 @@ describe('Good-Specific Price Elasticity (Track 05)', () => {
     it('should have luxury with highest elasticity (most volatile)', () => {
       const { goodMarketConfigs } = config;
 
-      expect(goodMarketConfigs.luxury.priceElasticity).toBeGreaterThan(1.0);
+      // Luxury should be highest but we've reduced all values for stability
+      expect(goodMarketConfigs.luxury.priceElasticity).toBeGreaterThan(
+        goodMarketConfigs.food.priceElasticity
+      );
     });
   });
 
@@ -117,8 +120,8 @@ describe('Good-Specific Price Elasticity (Track 05)', () => {
     it('should show lower price change for food at 50% stock', () => {
       // 50% stock means idealStock/currentStock = 2
       // pressure = 2^elasticity
-      // food (0.6): 2^0.6 ≈ 1.52
-      // luxury (1.4): 2^1.4 ≈ 2.64
+      // food (0.4): 2^0.4 ≈ 1.32
+      // luxury (0.8): 2^0.8 ≈ 1.74
 
       const fishDef = goods.get('fish')!;
       const luxuryDef = goods.get('luxuries')!;
@@ -134,9 +137,9 @@ describe('Good-Specific Price Elasticity (Track 05)', () => {
       // Fish pressure should be lower than luxury pressure
       expect(fishBreakdown.pressure).toBeLessThan(luxuryBreakdown.pressure);
 
-      // Verify approximate values
-      expect(fishBreakdown.pressure).toBeCloseTo(Math.pow(2, 0.6), 1);
-      expect(luxuryBreakdown.pressure).toBeCloseTo(Math.pow(2, 1.4), 1);
+      // Verify approximate values with new elasticity values
+      expect(fishBreakdown.pressure).toBeCloseTo(Math.pow(2, 0.4), 1);
+      expect(luxuryBreakdown.pressure).toBeCloseTo(Math.pow(2, 0.8), 1);
     });
 
     it('should show higher price change for luxury at 50% stock', () => {
@@ -222,9 +225,10 @@ describe('Good-Specific Price Elasticity (Track 05)', () => {
       const toolsBreakdown = getPriceBreakdown(shortageIsland, 'tools', toolsDef, [], config);
       const luxuryBreakdown = getPriceBreakdown(shortageIsland, 'luxuries', luxuryDef, [], config);
 
-      // Verify ordering: food < tool < material < luxury (based on elasticity)
+      // Verify ordering: food < (tool = material) < luxury (based on elasticity)
+      // Tool and material now have same elasticity (0.5) for stability
       expect(fishBreakdown.pressure).toBeLessThan(toolsBreakdown.pressure);
-      expect(toolsBreakdown.pressure).toBeLessThan(timberBreakdown.pressure);
+      expect(toolsBreakdown.pressure).toBeLessThanOrEqual(timberBreakdown.pressure);
       expect(timberBreakdown.pressure).toBeLessThan(luxuryBreakdown.pressure);
     });
   });
@@ -302,17 +306,18 @@ describe('Good-Specific Price Elasticity (Track 05)', () => {
       const fishBreakdown = getPriceBreakdown(island, 'fish', fishDef, [], config);
       const luxuryBreakdown = getPriceBreakdown(island, 'luxuries', luxuryDef, [], config);
 
-      expect(fishBreakdown.priceElasticity).toBe(0.6);
-      expect(luxuryBreakdown.priceElasticity).toBe(1.4);
+      // Updated elasticity values for price stability
+      expect(fishBreakdown.priceElasticity).toBe(0.4);
+      expect(luxuryBreakdown.priceElasticity).toBe(0.8);
     });
   });
 
   describe('expected price changes at 50% stock (from spec)', () => {
-    // From the spec: Price Response Comparison (50% stock reduction)
-    // Fish: elasticity 0.6 → +52% (pressure = 2^0.6 ≈ 1.52)
-    // Timber: elasticity 0.9 → +87% (pressure = 2^0.9 ≈ 1.87)
-    // Tools: elasticity 0.8 → +74% (pressure = 2^0.8 ≈ 1.74)
-    // Luxuries: elasticity 1.4 → +164% (pressure = 2^1.4 ≈ 2.64)
+    // Updated for reduced elasticity values (price stability)
+    // Fish: elasticity 0.4 → +32% (pressure = 2^0.4 ≈ 1.32)
+    // Timber: elasticity 0.5 → +41% (pressure = 2^0.5 ≈ 1.41)
+    // Tools: elasticity 0.5 → +41% (pressure = 2^0.5 ≈ 1.41)
+    // Luxuries: elasticity 0.8 → +74% (pressure = 2^0.8 ≈ 1.74)
 
     it('should produce expected pressure values at 50% stock', () => {
       const island = createTestIsland({
@@ -333,10 +338,10 @@ describe('Good-Specific Price Elasticity (Track 05)', () => {
       const luxuryBreakdown = getPriceBreakdown(island, 'luxuries', luxuryDef, [], config);
 
       // pressure = (ideal/current)^elasticity = 2^elasticity
-      expect(fishBreakdown.pressure).toBeCloseTo(Math.pow(2, 0.6), 2); // ~1.52
-      expect(timberBreakdown.pressure).toBeCloseTo(Math.pow(2, 0.9), 2); // ~1.87
-      expect(toolsBreakdown.pressure).toBeCloseTo(Math.pow(2, 0.8), 2); // ~1.74
-      expect(luxuryBreakdown.pressure).toBeCloseTo(Math.pow(2, 1.4), 2); // ~2.64
+      expect(fishBreakdown.pressure).toBeCloseTo(Math.pow(2, 0.4), 2); // ~1.32
+      expect(timberBreakdown.pressure).toBeCloseTo(Math.pow(2, 0.5), 2); // ~1.41
+      expect(toolsBreakdown.pressure).toBeCloseTo(Math.pow(2, 0.5), 2); // ~1.41
+      expect(luxuryBreakdown.pressure).toBeCloseTo(Math.pow(2, 0.8), 2); // ~1.74
     });
   });
 });

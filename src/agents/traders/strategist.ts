@@ -24,8 +24,8 @@ export interface StrategistConfig {
 
 const DEFAULT_CONFIG: StrategistConfig = {
   strategyValidityTicks: 48, // ~2 game days
-  minProfitMargin: 0.15, // 15% minimum
-  maxRoutes: 3,
+  minProfitMargin: 0.10, // 10% minimum (was 15%)
+  maxRoutes: 8, // Allow more routes for better coverage (was 3)
 };
 
 /**

@@ -100,9 +100,9 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   timeScale: 1,
 
   // Market tuning
-  priceGamma: 1.5,
-  priceVelocityK: 0.3,
-  priceLambda: 0.1,
+  priceGamma: 0.8, // Reduced from 1.5 for more realistic price response
+  priceVelocityK: 0.2, // Reduced from 0.3 for less velocity impact
+  priceLambda: 0.2, // Increased from 0.1 for smoother price changes
   minPrice: 1, // Tightened from 0.1 to prevent near-zero prices
   maxPrice: 200, // Tightened from 1000 to prevent extreme spikes
 
@@ -148,25 +148,26 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   emptyReturnMultiplier: 0.5, // Cost multiplier for empty return voyage
 
   // Good-Specific Price Elasticity (Track 05)
+  // Reduced elasticity values for more stable prices (~40% reduction)
   goodMarketConfigs: {
     food: {
-      priceElasticity: 0.6, // Essential goods: lower elasticity, more stable prices
-      velocityCoefficient: 0.4,
+      priceElasticity: 0.4, // Essential goods: very stable prices (was 0.6)
+      velocityCoefficient: 0.3,
       idealStockDays: 7,
     },
     material: {
-      priceElasticity: 0.9, // Moderate substitution
-      velocityCoefficient: 0.3,
+      priceElasticity: 0.5, // Materials: moderate stability (was 0.9)
+      velocityCoefficient: 0.2,
       idealStockDays: 14,
     },
     tool: {
-      priceElasticity: 0.8, // Investment-driven, somewhat elastic
-      velocityCoefficient: 0.2,
+      priceElasticity: 0.5, // Tools: moderate stability (was 0.8)
+      velocityCoefficient: 0.15,
       idealStockDays: 30,
     },
     luxury: {
-      priceElasticity: 1.4, // Highly discretionary, volatile prices
-      velocityCoefficient: 0.5,
+      priceElasticity: 0.8, // Luxuries: more volatile but manageable (was 1.4)
+      velocityCoefficient: 0.3,
       idealStockDays: 21,
     },
   },
@@ -295,8 +296,9 @@ function createInitialInventory(
       inventory.set('luxuries', 15);
       break;
     case 'forest':
-      inventory.set('fish', 50);
-      inventory.set('grain', 80);
+      // Increased starting food to allow time for trade routes to establish
+      inventory.set('fish', 100);
+      inventory.set('grain', 150);
       inventory.set('timber', 250);
       inventory.set('tools', 25);
       inventory.set('luxuries', 10);
@@ -374,9 +376,10 @@ function createProductionParams(
       baseRate.set('luxuries', 0.7);
       break;
     case 'forest':
-      baseRate.set('fish', 0.7);
-      baseRate.set('grain', 2);
-      baseRate.set('timber', 13);  // Was 20
+      // Slight increase in food production to prevent starvation before trade establishes
+      baseRate.set('fish', 1.5);  // Was 0.7 - small fishing village
+      baseRate.set('grain', 3);   // Was 2 - some subsistence farming
+      baseRate.set('timber', 13); // Was 20
       baseRate.set('tools', 2);
       baseRate.set('luxuries', 0.3);
       break;
