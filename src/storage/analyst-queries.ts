@@ -328,7 +328,7 @@ export function getMarketEfficiencyMetrics(db: SimulationDatabase, runId: number
 
   // Price convergence by good (how close prices are across islands)
   const convergenceRows = dbInstance.prepare(`
-    SELECT p.good_id,
+    SELECT sub.good_id,
       AVG(CASE WHEN avg_price > 0 THEN 1 - (std_dev / avg_price) ELSE 1 END) as convergence
     FROM (
       SELECT s.tick, p.good_id,
@@ -339,7 +339,7 @@ export function getMarketEfficiencyMetrics(db: SimulationDatabase, runId: number
       WHERE s.run_id = ?
       GROUP BY s.tick, p.good_id
     ) sub
-    GROUP BY good_id
+    GROUP BY sub.good_id
   `).all(runId) as Array<{ good_id: string; convergence: number }>;
 
   const priceConvergenceByGood: Record<string, number> = {};
@@ -349,7 +349,7 @@ export function getMarketEfficiencyMetrics(db: SimulationDatabase, runId: number
 
   // Average price spread (max - min across islands)
   const spreadRows = dbInstance.prepare(`
-    SELECT p.good_id,
+    SELECT sub.good_id,
       AVG(max_price - min_price) as avg_spread
     FROM (
       SELECT s.tick, p.good_id,
@@ -360,7 +360,7 @@ export function getMarketEfficiencyMetrics(db: SimulationDatabase, runId: number
       WHERE s.run_id = ?
       GROUP BY s.tick, p.good_id
     ) sub
-    GROUP BY good_id
+    GROUP BY sub.good_id
   `).all(runId) as Array<{ good_id: string; avg_spread: number }>;
 
   const avgPriceSpread: Record<string, number> = {};
