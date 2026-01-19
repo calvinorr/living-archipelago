@@ -13,13 +13,20 @@ import type {
   GoodId,
   IslandId,
   ShipId,
+  ShipyardId,
   AgentId,
   GameTime,
   MarketState,
   ProductionParams,
   LabourAllocation,
   Sector,
+  ShipyardState,
+  CrewState,
+  BuildingsConfig,
+  BuildingId,
+  Building,
 } from './types.js';
+import { createShipyard } from '../systems/shipyard.js';
 
 /**
  * Mapping from labor sectors to produced goods (Track 06)
@@ -39,6 +46,52 @@ export const SECTOR_TO_GOOD: Record<Sector, GoodId | null> = {
 export const SECTORS: Sector[] = ['fishing', 'forestry', 'farming', 'industry', 'services'];
 
 /**
+ * Default buildings configuration (Track 08)
+ */
+export const DEFAULT_BUILDINGS_CONFIG: BuildingsConfig = {
+  definitions: {
+    warehouse: {
+      type: 'warehouse',
+      name: 'Warehouse',
+      description: 'Reduce spoilage, increase storage capacity',
+      buildCost: { timber: 30, tools: 10, coins: 50 },
+      buildTicks: 72,
+      maintenanceCost: 0.5,
+      maxLevel: 3,
+    },
+    market: {
+      type: 'market',
+      name: 'Market',
+      description: 'Reduce trade friction, better price discovery',
+      buildCost: { timber: 20, tools: 15, coins: 80 },
+      buildTicks: 48,
+      maintenanceCost: 1.0,
+      maxLevel: 3,
+    },
+    port: {
+      type: 'port',
+      name: 'Port',
+      description: 'Faster ship loading/unloading',
+      buildCost: { timber: 50, tools: 20, coins: 100 },
+      buildTicks: 96,
+      maintenanceCost: 1.5,
+      maxLevel: 3,
+    },
+    workshop: {
+      type: 'workshop',
+      name: 'Workshop',
+      description: 'Tool production bonus',
+      buildCost: { timber: 25, tools: 25, coins: 60 },
+      buildTicks: 60,
+      maintenanceCost: 0.8,
+      maxLevel: 3,
+    },
+  },
+  conditionDecayRate: 0.001,
+  levelEffectMultiplier: 0.5,
+};
+
+/**
  * Default simulation configuration
  */
 export const DEFAULT_CONFIG: SimulationConfig = {
@@ -50,11 +103,11 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   priceGamma: 1.5,
   priceVelocityK: 0.3,
   priceLambda: 0.1,
-  minPrice: 0.1,
-  maxPrice: 1000,
+  minPrice: 1, // Tightened from 0.1 to prevent near-zero prices
+  maxPrice: 200, // Tightened from 1000 to prevent extreme spikes
 
   // Population tuning
-  foodPerCapita: 0.05, // 0.05 units per person per hour
+  foodPerCapita: 0.06, // 0.06 units per person per hour (20% more than original - creates pressure without collapse)
   healthPenaltyRate: 0.1,
   populationDeclineThreshold: 0.3,
 
@@ -65,9 +118,9 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   healthConsumptionFactor: 0.3, // 30% consumption reduction at 0 health
 
   // Population growth tuning (Track 04)
-  maxGrowthRate: 0.005, // 0.5% annual growth at optimal health
+  maxGrowthRate: 0.002, // 0.2% annual growth at optimal health (reduced from 0.5%)
   maxDeclineRate: 0.02, // 2% annual decline at crisis health
-  stableHealthThreshold: 0.5, // Health where population is stable
+  stableHealthThreshold: 0.65, // Health where population is stable (raised from 0.5)
   optimalHealthThreshold: 0.9, // Health for maximum growth
   crisisHealthThreshold: 0.3, // Health for maximum decline
 
@@ -132,6 +185,37 @@ export const DEFAULT_CONFIG: SimulationConfig = {
     minSectorShare: 0.02, // Minimum 2% in any sector
     maxSectorShare: 0.60, // Maximum 60% in any sector
   },
+
+  // Ship Crew System
+  crewConfig: {
+    minCrewRatio: 0.3, // Need at least 30% crew to operate
+    baseWageRate: 0.5, // 0.5 coins per crew member per tick
+    moraleDecayRate: 0.005, // 0.5% morale decay per tick in bad conditions
+    moraleRecoveryRate: 0.01, // 1% morale recovery per tick in good conditions
+    desertionMoraleThreshold: 0.2, // Below 20% morale, crew start deserting
+    desertionRate: 0.02, // 2% of crew desert per tick when morale is very low
+    unpaidDesertionThreshold: 48, // 2 days without pay before desertion starts
+    speedMoraleBonus: 0.2, // +20% speed at max morale
+    speedMoralePenalty: 0.3, // -30% speed at min morale
+    atSeaMoralePenalty: 0.002, // Additional 0.2% morale decay when at sea
+    lowCrewMoralePenalty: 0.01, // 1% morale penalty when understaffed
+  },
+
+  // Ship Maintenance System (Track 08)
+  maintenanceConfig: {
+    baseWearRate: 0.0002, // 0.02% condition loss per tick at sea (~5% per day)
+    distanceWearRate: 0.00005, // Wear per distance unit traveled
+    stormWearMultiplier: 3.0, // 3x wear during storms
+    repairRateAtIsland: 0.01, // 1% condition restored per tick when docked
+    repairTimberCostPerPoint: 0.5, // 0.5 timber per 1% repair
+    repairCoinCostPerPoint: 2, // 2 coins per 1% repair
+    speedConditionPenalty: 0.4, // -40% speed at 0 condition
+    criticalConditionThreshold: 0.15, // Below 15%, ship at risk
+    sinkingChancePerTick: 0.001, // 0.1% chance of sinking per tick when critical
+  },
+
+  // Buildings System (Track 08)
+  buildingsConfig: DEFAULT_BUILDINGS_CONFIG,
 };
 
 /**
@@ -273,27 +357,28 @@ function createProductionParams(
   const toolSensitivity = new Map<GoodId, number>();
   const ecosystemSensitivity = new Map<GoodId, number>();
 
+  // Production rates reduced ~35% from original to create tighter economy
   switch (archetype) {
     case 'fishing':
-      baseRate.set('fish', 15);
-      baseRate.set('grain', 2);
-      baseRate.set('timber', 3);
-      baseRate.set('tools', 1);
-      baseRate.set('luxuries', 0.5);
+      baseRate.set('fish', 10);  // Was 15
+      baseRate.set('grain', 1.5);
+      baseRate.set('timber', 2);
+      baseRate.set('tools', 0.7);
+      baseRate.set('luxuries', 0.3);
       break;
     case 'agricultural':
-      baseRate.set('fish', 2);
-      baseRate.set('grain', 18);
-      baseRate.set('timber', 4);
-      baseRate.set('tools', 2);
-      baseRate.set('luxuries', 1);
+      baseRate.set('fish', 1.5);
+      baseRate.set('grain', 12);  // Was 18
+      baseRate.set('timber', 2.5);
+      baseRate.set('tools', 1.3);
+      baseRate.set('luxuries', 0.7);
       break;
     case 'forest':
-      baseRate.set('fish', 1);
-      baseRate.set('grain', 3);
-      baseRate.set('timber', 20);
-      baseRate.set('tools', 3);
-      baseRate.set('luxuries', 0.5);
+      baseRate.set('fish', 0.7);
+      baseRate.set('grain', 2);
+      baseRate.set('timber', 13);  // Was 20
+      baseRate.set('tools', 2);
+      baseRate.set('luxuries', 0.3);
       break;
   }
 
@@ -354,6 +439,7 @@ export function createMVPIslands(goods: GoodDefinition[]): Map<IslandId, IslandS
     inventory: createInitialInventory('fishing'),
     market: createInitialMarket(goods, 'fishing'),
     productionParams: createProductionParams('fishing'),
+    buildings: new Map<BuildingId, Building>(),
   });
 
   // Greenbarrow - Agricultural Isle
@@ -382,6 +468,7 @@ export function createMVPIslands(goods: GoodDefinition[]): Map<IslandId, IslandS
     inventory: createInitialInventory('agricultural'),
     market: createInitialMarket(goods, 'agricultural'),
     productionParams: createProductionParams('agricultural'),
+    buildings: new Map<BuildingId, Building>(),
   });
 
   // Timberwake - Forest Isle
@@ -410,9 +497,25 @@ export function createMVPIslands(goods: GoodDefinition[]): Map<IslandId, IslandS
     inventory: createInitialInventory('forest'),
     market: createInitialMarket(goods, 'forest'),
     productionParams: createProductionParams('forest'),
+    buildings: new Map<BuildingId, Building>(),
   });
 
   return islands;
+}
+
+/**
+ * Create default crew state for a ship
+ */
+export function createDefaultCrew(capacity: number, baseWageRate: number = 0.5): CrewState {
+  // Crew capacity scales with ship cargo capacity
+  const crewCapacity = Math.max(5, Math.floor(capacity / 10));
+  return {
+    count: crewCapacity, // Start fully crewed
+    capacity: crewCapacity,
+    morale: 0.8, // Start with good morale
+    wageRate: baseWageRate,
+    unpaidTicks: 0,
+  };
 }
 
 /**
@@ -424,25 +527,31 @@ export function createMVPShips(): Map<ShipId, ShipState> {
   ships.set('sloop-1', {
     id: 'sloop-1',
     name: 'Sea Trader',
-    ownerId: 'trader-1',
+    ownerId: 'trader-alpha',
     capacity: 100,
     speed: 10, // distance units per hour
     cash: 500,
     cargo: new Map(),
     location: { kind: 'at_island', islandId: 'shoalhold' },
     cumulativeTransportCosts: 0,
+    crew: createDefaultCrew(100),
+    condition: 1.0, // New ships start at full condition
+    totalDistanceTraveled: 0,
   });
 
   ships.set('sloop-2', {
     id: 'sloop-2',
     name: 'Wave Runner',
-    ownerId: 'trader-2',
+    ownerId: 'trader-alpha',
     capacity: 80,
     speed: 12,
     cash: 400,
     cargo: new Map(),
     location: { kind: 'at_island', islandId: 'greenbarrow' },
     cumulativeTransportCosts: 0,
+    crew: createDefaultCrew(80),
+    condition: 1.0,
+    totalDistanceTraveled: 0,
   });
 
   return ships;
@@ -478,6 +587,20 @@ export function createMVPAgents(): Map<AgentId, AgentState> {
 }
 
 /**
+ * Create MVP shipyards - one per island
+ */
+export function createMVPShipyards(): Map<ShipyardId, ShipyardState> {
+  const shipyards = new Map<ShipyardId, ShipyardState>();
+
+  // Each island gets a shipyard
+  shipyards.set('shipyard-shoalhold', createShipyard('shoalhold', 'Shoalhold Docks'));
+  shipyards.set('shipyard-greenbarrow', createShipyard('greenbarrow', 'Greenbarrow Harbor'));
+  shipyards.set('shipyard-timberwake', createShipyard('timberwake', 'Timberwake Shipworks'));
+
+  return shipyards;
+}
+
+/**
  * Calculate game time from tick
  */
 export function tickToGameTime(tick: number): GameTime {
@@ -494,6 +617,7 @@ export function initializeWorld(seed: number): WorldState {
   const goods = createGoodsMap(MVP_GOODS);
   const islands = createMVPIslands(MVP_GOODS);
   const ships = createMVPShips();
+  const shipyards = createMVPShipyards();
   const agents = createMVPAgents();
 
   return {
@@ -502,6 +626,7 @@ export function initializeWorld(seed: number): WorldState {
     rngState: seed,
     islands,
     ships,
+    shipyards,
     events: [],
     agents,
     goods,
@@ -524,6 +649,12 @@ export function cloneWorldState(state: WorldState): WorldState {
     ),
     ships: new Map(
       Array.from(state.ships.entries()).map(([id, ship]) => [id, cloneShip(ship)])
+    ),
+    shipyards: new Map(
+      Array.from(state.shipyards.entries()).map(([id, shipyard]) => [
+        id,
+        cloneShipyard(shipyard),
+      ])
     ),
     events: state.events.map((e) => ({ ...e, modifiers: { ...e.modifiers } })),
     agents: new Map(
@@ -558,6 +689,12 @@ function cloneIsland(island: IslandState): IslandState {
       toolSensitivity: new Map(island.productionParams.toolSensitivity),
       ecosystemSensitivity: new Map(island.productionParams.ecosystemSensitivity),
     },
+    buildings: new Map(
+      Array.from(island.buildings.entries()).map(([id, building]) => [
+        id,
+        { ...building },
+      ])
+    ),
   };
 }
 
@@ -575,5 +712,14 @@ function cloneShip(ship: ShipState): ShipState {
           },
     cumulativeTransportCosts: ship.cumulativeTransportCosts,
     lastVoyageCost: ship.lastVoyageCost,
+    crew: { ...ship.crew },
+  };
+}
+
+function cloneShipyard(shipyard: ShipyardState): ShipyardState {
+  return {
+    ...shipyard,
+    currentOrder: shipyard.currentOrder ? { ...shipyard.currentOrder } : null,
+    completedShips: [...shipyard.completedShips],
   };
 }

@@ -130,6 +130,7 @@ export interface IslandState {
   inventory: Map<GoodId, number>;
   market: MarketState;
   productionParams: ProductionParams;
+  buildings: Map<BuildingId, Building>;
 }
 
 // ============================================================================
@@ -147,6 +148,53 @@ export interface Route {
   progress: number; // 0..1
 }
 
+// ============================================================================
+// Crew System
+// ============================================================================
+
+/**
+ * Crew state for a ship
+ */
+export interface CrewState {
+  count: number; // Current number of crew members
+  capacity: number; // Maximum crew the ship can hold
+  morale: number; // 0-1, affects ship efficiency
+  wageRate: number; // Wage per crew member per tick
+  unpaidTicks: number; // Ticks since last wage payment (for desertion tracking)
+}
+
+/**
+ * Crew configuration parameters
+ */
+export interface CrewConfig {
+  minCrewRatio: number; // Minimum crew/capacity ratio to operate (e.g., 0.3)
+  baseWageRate: number; // Default wage per crew member per tick
+  moraleDecayRate: number; // Morale decay per tick when conditions are bad
+  moraleRecoveryRate: number; // Morale recovery per tick when conditions are good
+  desertionMoraleThreshold: number; // Morale below which crew desert
+  desertionRate: number; // Fraction of crew that desert per tick when morale is low
+  unpaidDesertionThreshold: number; // Ticks without pay before desertion starts
+  speedMoraleBonus: number; // Max speed bonus from high morale (e.g., 0.2 = +20%)
+  speedMoralePenalty: number; // Max speed penalty from low morale (e.g., 0.3 = -30%)
+  atSeaMoralePenalty: number; // Additional morale decay when at sea
+  lowCrewMoralePenalty: number; // Morale penalty when understaffed
+}
+
+/**
+ * Ship maintenance configuration (Track 08)
+ */
+export interface MaintenanceConfig {
+  baseWearRate: number; // Condition loss per tick when at sea (e.g., 0.0005)
+  distanceWearRate: number; // Additional wear per distance unit traveled (e.g., 0.0001)
+  stormWearMultiplier: number; // Wear multiplier during storms (e.g., 3.0)
+  repairRateAtIsland: number; // Condition restored per tick when docked (e.g., 0.02)
+  repairTimberCostPerPoint: number; // Timber cost per 0.01 condition restored (e.g., 1)
+  repairCoinCostPerPoint: number; // Coin cost per 0.01 condition restored (e.g., 5)
+  speedConditionPenalty: number; // Max speed penalty at 0 condition (e.g., 0.5 = -50%)
+  criticalConditionThreshold: number; // Below this, ship risks sinking (e.g., 0.1)
+  sinkingChancePerTick: number; // Chance of sinking per tick when critical (e.g., 0.001)
+}
+
 export interface ShipState {
   id: ShipId;
   name: string;
@@ -158,6 +206,9 @@ export interface ShipState {
   location: ShipLocation;
   lastVoyageCost?: number; // Cost of most recent completed voyage (Track 02)
   cumulativeTransportCosts: number; // Total transport costs incurred (Track 02)
+  crew: CrewState; // Ship crew state
+  condition: number; // 0-1, ship hull/equipment condition (Track 08)
+  totalDistanceTraveled: number; // Cumulative distance for wear calculation
 }
 
 /**
@@ -231,6 +282,7 @@ export interface WorldState {
   rngState: number; // Seed state for determinism
   islands: Map<IslandId, IslandState>;
   ships: Map<ShipId, ShipState>;
+  shipyards: Map<ShipyardId, ShipyardState>;
   events: WorldEvent[];
   agents: Map<AgentId, AgentState>;
   goods: Map<GoodId, GoodDefinition>;
@@ -298,12 +350,120 @@ export interface SimulationConfig {
 
   // Wage-Based Labor Allocation (Track 06)
   laborConfig: LaborConfig;
+
+  // Ship Crew System
+  crewConfig: CrewConfig;
+
+  // Ship Maintenance System (Track 08)
+  maintenanceConfig: MaintenanceConfig;
+
+  // Buildings System (Track 08)
+  buildingsConfig: BuildingsConfig;
 }
 
 /**
  * Ecosystem health classification (Track 07)
  */
 export type EcosystemHealthState = 'healthy' | 'stressed' | 'degraded' | 'collapsed' | 'dead';
+
+// ============================================================================
+// Shipyard System (Ship Building)
+// ============================================================================
+
+export type ShipyardId = string;
+export type BuildOrderId = string;
+
+/**
+ * Blueprint defining ship specifications and build costs
+ */
+export interface ShipBlueprint {
+  id: string;
+  name: string;
+  description: string;
+  // Ship stats
+  capacity: number;
+  speed: number;
+  // Build requirements
+  timberCost: number;
+  toolsCost: number;
+  coinCost: number; // Labor cost
+  buildTicks: number; // Total ticks to complete construction
+}
+
+/**
+ * Active ship build order in a shipyard
+ */
+export interface ShipBuildOrder {
+  id: BuildOrderId;
+  blueprintId: string;
+  shipName: string;
+  ownerId: AgentId;
+  startTick: number;
+  completionTick: number;
+  progress: number; // 0..1
+}
+
+/**
+ * Shipyard state - attached to an island
+ */
+export interface ShipyardState {
+  id: ShipyardId;
+  islandId: IslandId;
+  name: string;
+  // Current build queue (one ship at a time for simplicity)
+  currentOrder: ShipBuildOrder | null;
+  // Completed ships waiting to be claimed
+  completedShips: ShipId[];
+  // Statistics
+  totalShipsBuilt: number;
+}
+
+/**
+ * Ship blueprints configuration
+ */
+export interface ShipyardConfig {
+  blueprints: Map<string, ShipBlueprint>;
+}
+
+// ============================================================================
+// Buildings System (Track 08)
+// ============================================================================
+
+export type BuildingId = string;
+
+export type BuildingType =
+  | 'warehouse'    // Reduce spoilage, increase storage capacity
+  | 'market'       // Reduce trade friction, better price discovery
+  | 'port'         // Faster ship loading/unloading
+  | 'workshop';    // Tool production bonus
+
+export interface BuildingDefinition {
+  type: BuildingType;
+  name: string;
+  description: string;
+  buildCost: {
+    timber: number;
+    tools: number;
+    coins: number;
+  };
+  buildTicks: number;
+  maintenanceCost: number; // Coins per tick
+  maxLevel: number;
+}
+
+export interface Building {
+  id: BuildingId;
+  type: BuildingType;
+  level: number;          // 1 to maxLevel
+  condition: number;      // 0-1, degrades without maintenance
+  islandId: IslandId;
+}
+
+export interface BuildingsConfig {
+  definitions: Record<BuildingType, BuildingDefinition>;
+  conditionDecayRate: number;      // Decay per tick without maintenance
+  levelEffectMultiplier: number;   // How much each level increases effect
+}
 
 // ============================================================================
 // Helper type for immutable state updates
