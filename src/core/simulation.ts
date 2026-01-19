@@ -89,6 +89,46 @@ export class Simulation {
   }
 
   /**
+   * Get current config
+   */
+  getConfig(): SimulationConfig {
+    return { ...this.config };
+  }
+
+  /**
+   * Update config at runtime (for applying analyst improvements)
+   * Only updates specified paths, preserves rest of config
+   */
+  updateConfig(updates: Partial<SimulationConfig>): void {
+    this.config = { ...this.config, ...updates };
+    console.log('[Simulation] Config updated:', Object.keys(updates).join(', '));
+  }
+
+  /**
+   * Update a specific config value by path (dot notation)
+   * e.g., updateConfigPath('maxGrowthRate', 0.005)
+   * e.g., updateConfigPath('laborConfig.wageResponsiveness', 1.5)
+   */
+  updateConfigPath(path: string, value: unknown): boolean {
+    const parts = path.split('.');
+    let current: Record<string, unknown> = this.config as unknown as Record<string, unknown>;
+
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (current[part] === undefined || typeof current[part] !== 'object') {
+        return false;
+      }
+      current = current[part] as Record<string, unknown>;
+    }
+
+    const lastPart = parts[parts.length - 1];
+    const oldValue = current[lastPart];
+    current[lastPart] = value;
+    console.log(`[Simulation] Config ${path}: ${JSON.stringify(oldValue)} → ${JSON.stringify(value)}`);
+    return true;
+  }
+
+  /**
    * Get tick history hashes for determinism verification
    */
   getTickHistory(): string[] {

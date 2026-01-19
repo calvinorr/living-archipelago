@@ -781,7 +781,7 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
     return;
   }
 
-  // Apply improvement (POST)
+  // Apply improvement (POST) - actually updates the running simulation config
   if (url.pathname === '/api/analyst/improvements/apply' && req.method === 'POST') {
     let body = '';
     req.on('data', (chunk) => {
@@ -796,21 +796,83 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
           return;
         }
 
-        // For now, just acknowledge the request
-        // Full implementation would write to config file
-        console.log(`[Analyst] Improvement requested: ${configPath} = ${JSON.stringify(newValue)}`);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          success: true,
-          configPath,
-          newValue,
-          message: 'Improvement recorded. Apply changes to config manually for now.',
-        }));
+        // Apply to running simulation if active
+        if (state.simulation) {
+          const oldConfig = state.simulation.getConfig();
+          const success = state.simulation.updateConfigPath(configPath, newValue);
+
+          if (success) {
+            // Get old value for response
+            const parts = configPath.split('.');
+            let oldValue: unknown = oldConfig;
+            for (const part of parts) {
+              if (oldValue && typeof oldValue === 'object') {
+                oldValue = (oldValue as Record<string, unknown>)[part];
+              }
+            }
+
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              success: true,
+              configPath,
+              oldValue,
+              newValue,
+              message: `Config updated: ${configPath} changed from ${JSON.stringify(oldValue)} to ${JSON.stringify(newValue)}. Changes take effect immediately.`,
+            }));
+          } else {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: `Invalid config path: ${configPath}` }));
+          }
+        } else {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'No simulation running' }));
+        }
       } catch {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'Invalid JSON body' }));
       }
     });
+    return;
+  }
+
+  // Delete a run (DELETE)
+  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+$/) && req.method === 'DELETE') {
+    if (!state.database) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Database not enabled' }));
+      return;
+    }
+
+    const runId = parseInt(url.pathname.split('/')[4], 10);
+
+    // Don't allow deleting the current run
+    const currentRunId = state.database.getCurrentRunId();
+    if (runId === currentRunId) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Cannot delete the currently active run' }));
+      return;
+    }
+
+    try {
+      const db = state.database.getDb();
+
+      // Delete in order due to foreign keys
+      db.prepare('DELETE FROM prices WHERE snapshot_id IN (SELECT id FROM snapshots WHERE run_id = ?)').run(runId);
+      db.prepare('DELETE FROM island_metrics WHERE snapshot_id IN (SELECT id FROM snapshots WHERE run_id = ?)').run(runId);
+      db.prepare('DELETE FROM snapshots WHERE run_id = ?').run(runId);
+      db.prepare('DELETE FROM trades WHERE run_id = ?').run(runId);
+      db.prepare('DELETE FROM llm_calls WHERE run_id = ?').run(runId);
+      db.prepare('DELETE FROM events WHERE run_id = ?').run(runId);
+      db.prepare('DELETE FROM runs WHERE id = ?').run(runId);
+
+      console.log(`[Database] Deleted run ${runId}`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, message: `Run ${runId} deleted` }));
+    } catch (error) {
+      console.error('[Database] Delete error:', error);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Failed to delete run' }));
+    }
     return;
   }
 

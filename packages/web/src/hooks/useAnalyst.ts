@@ -16,6 +16,7 @@ interface AnalystStore extends AnalystState {
   // Actions
   fetchRuns: () => Promise<void>;
   selectRun: (runId: number) => Promise<void>;
+  deleteRun: (runId: number) => Promise<void>;
   analyzeRun: (runId: number) => Promise<void>;
   sendChatMessage: (message: string) => Promise<void>;
   applyImprovement: (improvementId: string) => Promise<void>;
@@ -60,6 +61,30 @@ export const useAnalyst = create<AnalystStore>((set, get) => ({
       set({ runData: data });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : 'Failed to fetch run data' });
+    }
+  },
+
+  deleteRun: async (runId: number) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/analyst/runs/${runId}`, {
+        method: 'DELETE',
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || 'Failed to delete run');
+      }
+
+      // Clear selection if we deleted the selected run
+      const { selectedRunId } = get();
+      if (selectedRunId === runId) {
+        set({ selectedRunId: null, runData: null, analysis: null });
+      }
+
+      // Refresh runs list
+      get().fetchRuns();
+    } catch (error) {
+      set({ error: error instanceof Error ? error.message : 'Failed to delete run' });
     }
   },
 
