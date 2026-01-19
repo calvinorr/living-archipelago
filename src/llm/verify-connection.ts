@@ -3,6 +3,9 @@
  * Run with: npx tsx src/llm/verify-connection.ts
  */
 
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
+
 import { LLMClient, LLMError } from './client.js';
 
 async function verifyConnection(): Promise<void> {

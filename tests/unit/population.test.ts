@@ -29,8 +29,8 @@ describe('calculateGrowthMultiplier', () => {
       expect(calculateGrowthMultiplier(0.2, config)).toBe(-1.0);
     });
 
-    it('should return 0.0 at stable health (0.5)', () => {
-      const multiplier = calculateGrowthMultiplier(0.5, config);
+    it('should return 0.0 at stable health (0.65)', () => {
+      const multiplier = calculateGrowthMultiplier(0.65, config);
       expect(multiplier).toBe(0.0);
     });
 
@@ -46,15 +46,15 @@ describe('calculateGrowthMultiplier', () => {
   });
 
   describe('interpolation between thresholds', () => {
-    it('should interpolate linearly between crisis (0.3) and stable (0.5)', () => {
-      // At 0.4 (midpoint between 0.3 and 0.5), should be -0.5
-      const multiplier = calculateGrowthMultiplier(0.4, config);
+    it('should interpolate linearly between crisis (0.3) and stable (0.65)', () => {
+      // At 0.475 (midpoint between 0.3 and 0.65), should be -0.5
+      const multiplier = calculateGrowthMultiplier(0.475, config);
       expect(multiplier).toBeCloseTo(-0.5, 5);
     });
 
-    it('should interpolate linearly between stable (0.5) and optimal (0.9)', () => {
-      // At 0.7 (midpoint between 0.5 and 0.9), should be 0.5
-      const multiplier = calculateGrowthMultiplier(0.7, config);
+    it('should interpolate linearly between stable (0.65) and optimal (0.9)', () => {
+      // At 0.775 (midpoint between 0.65 and 0.9), should be 0.5
+      const multiplier = calculateGrowthMultiplier(0.775, config);
       expect(multiplier).toBeCloseTo(0.5, 5);
     });
 
@@ -120,18 +120,18 @@ describe('Population Growth Rates', () => {
     return pop;
   }
 
-  it('should produce ~0.5% annual growth at optimal health', () => {
+  it('should produce ~0.2% annual growth at optimal health', () => {
     const initialPop = 1000;
     const finalPop = simulateYear(initialPop, 1.0);
     const growthRate = (finalPop - initialPop) / initialPop;
 
-    // Should be approximately 0.5% (0.005)
-    expect(growthRate).toBeCloseTo(0.005, 3);
+    // Should be approximately 0.2% (0.002) - reduced from 0.5% for tighter economy
+    expect(growthRate).toBeCloseTo(0.002, 3);
   });
 
-  it('should produce stable population at health = 0.5', () => {
+  it('should produce stable population at health = 0.65', () => {
     const initialPop = 1000;
-    const finalPop = simulateYear(initialPop, 0.5);
+    const finalPop = simulateYear(initialPop, 0.65);
     const growthRate = (finalPop - initialPop) / initialPop;
 
     // Should be approximately 0%
@@ -148,11 +148,11 @@ describe('Population Growth Rates', () => {
     expect(declineRate).toBeCloseTo(0.02, 3);
   });
 
-  it('should take ~140 years to double population at optimal health', () => {
-    // Doubling time = ln(2) / ln(1 + rate) ≈ 0.693 / 0.005 ≈ 139 years
+  it('should take ~350 years to double population at optimal health', () => {
+    // Doubling time = ln(2) / ln(1 + rate) ≈ 0.693 / 0.002 ≈ 347 years
     const doublingTime = Math.log(2) / Math.log(1 + config.maxGrowthRate);
-    expect(doublingTime).toBeGreaterThan(130);
-    expect(doublingTime).toBeLessThan(150);
+    expect(doublingTime).toBeGreaterThan(330);
+    expect(doublingTime).toBeLessThan(370);
   });
 
   it('should produce slower growth than before (was ~140% annual)', () => {

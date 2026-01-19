@@ -56,5 +56,10 @@ Thumbs.db
 # TypeScript
 *.tsbuildinfo
 
+# SQLite database files
+*.db
+*.db-shm
+*.db-wal
+
 # Debug
 .pnpm-debug.log*
