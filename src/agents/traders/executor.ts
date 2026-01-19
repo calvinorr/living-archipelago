@@ -3,7 +3,7 @@
  * Tactical decision-making based on strategy from LLM
  */
 
-import type { GoodId, IslandId } from '../../core/types.js';
+import type { GoodId, IslandId, TransportCostBreakdown } from '../../core/types.js';
 import type {
   ObservableState,
   ObservableShip,
@@ -12,6 +12,16 @@ import type {
 import type { Action, Transaction } from '../interfaces/action.js';
 import { createTradeAction, createNavigateAction, createWaitAction } from '../interfaces/action.js';
 import type { Strategy, TraderMemory } from './memory.js';
+
+/**
+ * Shipping cost configuration for the executor
+ */
+export interface ShippingCostConfig {
+  baseVoyageCost: number;
+  costPerDistanceUnit: number;
+  perVolumeHandlingCost: number;
+  emptyReturnMultiplier: number;
+}
 
 /**
  * Bulkiness values for goods (space per unit)
@@ -41,6 +51,8 @@ export interface ExecutorConfig {
   maxCargoFill: number;
   /** Prefer selling cargo before buying more */
   sellFirst: boolean;
+  /** Shipping cost configuration */
+  shippingCosts: ShippingCostConfig;
 }
 
 const DEFAULT_CONFIG: ExecutorConfig = {
@@ -48,6 +60,12 @@ const DEFAULT_CONFIG: ExecutorConfig = {
   minProfitMargin: 0.05, // 5% minimum (was 10% - too restrictive)
   maxCargoFill: 0.9, // Fill 90% of capacity max (was 80%)
   sellFirst: true,
+  shippingCosts: {
+    baseVoyageCost: 10,
+    costPerDistanceUnit: 0.1,
+    perVolumeHandlingCost: 0.05,
+    emptyReturnMultiplier: 0.5,
+  },
 };
 
 /**
@@ -323,26 +341,36 @@ export class Executor {
       for (const route of strategy.targetRoutes) {
         if (route.from !== island.id) continue;
 
+        const destIsland = observation.islands.get(route.to);
+        if (!destIsland) continue;
+
         for (const goodId of route.goods) {
           const buyPrice = island.prices.get(goodId) ?? 0;
-          const destIsland = observation.islands.get(route.to);
-          const sellPrice = destIsland?.prices.get(goodId) ?? 0;
+          const sellPrice = destIsland.prices.get(goodId) ?? 0;
 
           if (buyPrice > 0 && sellPrice > buyPrice) {
-            const margin = (sellPrice - buyPrice) / buyPrice;
-            if (margin >= this.config.minProfitMargin) {
-              // Calculate quantity based on actual constraints (accounting for bulkiness)
-              const bulkiness = getBulkiness(goodId);
-              const maxBySpace = Math.floor(maxSpace / bulkiness);
-              const maxByCash = Math.floor(availableCash / buyPrice);
-              const available = island.inventory?.get(goodId) ?? 0;
-              const quantity = Math.min(maxBySpace, maxByCash, available, 100); // Cap at 100 per good
+            // Calculate quantity based on actual constraints (accounting for bulkiness)
+            const bulkiness = getBulkiness(goodId);
+            const maxBySpace = Math.floor(maxSpace / bulkiness);
+            const maxByCash = Math.floor(availableCash / buyPrice);
+            const available = island.inventory?.get(goodId) ?? 0;
+            const quantity = Math.min(maxBySpace, maxByCash, available, 100); // Cap at 100 per good
 
-              if (quantity > 0) {
+            if (quantity > 0) {
+              // Evaluate profitability with transport costs
+              const evaluation = this.evaluateRouteProfitability(
+                island,
+                destIsland,
+                goodId,
+                quantity,
+                observation
+              );
+
+              if (evaluation.profitable) {
                 result.push({
                   goodId,
                   quantity,
-                  score: margin * route.priority,
+                  score: evaluation.netMargin * route.priority, // Use net margin instead of gross
                 });
               }
             }
@@ -355,19 +383,33 @@ export class Executor {
     if (result.length === 0 && observation.metrics.bestArbitrage) {
       const arb = observation.metrics.bestArbitrage;
       if (arb.fromIsland === island.id) {
-        const buyPrice = island.prices.get(arb.goodId) ?? 1;
-        const bulkiness = getBulkiness(arb.goodId);
-        const maxBySpace = Math.floor(maxSpace / bulkiness);
-        const maxByCash = Math.floor(availableCash / buyPrice);
-        const available = island.inventory?.get(arb.goodId) ?? 0;
-        const quantity = Math.min(maxBySpace, maxByCash, available, 50);
+        const destIsland = observation.islands.get(arb.toIsland);
+        if (destIsland) {
+          const buyPrice = island.prices.get(arb.goodId) ?? 1;
+          const bulkiness = getBulkiness(arb.goodId);
+          const maxBySpace = Math.floor(maxSpace / bulkiness);
+          const maxByCash = Math.floor(availableCash / buyPrice);
+          const available = island.inventory?.get(arb.goodId) ?? 0;
+          const quantity = Math.min(maxBySpace, maxByCash, available, 50);
 
-        if (quantity > 0) {
-          result.push({
-            goodId: arb.goodId,
-            quantity,
-            score: arb.margin,
-          });
+          if (quantity > 0) {
+            // Evaluate profitability with transport costs for arbitrage too
+            const evaluation = this.evaluateRouteProfitability(
+              island,
+              destIsland,
+              arb.goodId,
+              quantity,
+              observation
+            );
+
+            if (evaluation.profitable) {
+              result.push({
+                goodId: arb.goodId,
+                quantity,
+                score: evaluation.netMargin, // Use net margin instead of gross
+              });
+            }
+          }
         }
       }
     }
@@ -497,5 +539,73 @@ export class Executor {
       default:
         return quantity;
     }
+  }
+
+  /**
+   * Evaluate if a trade route is profitable after transport costs
+   */
+  private evaluateRouteProfitability(
+    fromIsland: ObservableIsland,
+    toIsland: ObservableIsland,
+    goodId: GoodId,
+    quantity: number,
+    _observation: ObservableState
+  ): { profitable: boolean; netMargin: number; transportCost: number } {
+    const buyPrice = fromIsland.prices.get(goodId) ?? 0;
+    const sellPrice = toIsland.prices.get(goodId) ?? 0;
+
+    if (buyPrice <= 0 || sellPrice <= buyPrice) {
+      return { profitable: false, netMargin: 0, transportCost: 0 };
+    }
+
+    // Calculate cargo volume for this trade
+    const bulkiness = getBulkiness(goodId);
+    const cargoVolume = quantity * bulkiness;
+
+    // Calculate transport costs
+    const transport = this.calculateRouteTransportCost(fromIsland, toIsland, cargoVolume);
+
+    // Calculate profit
+    const revenue = quantity * sellPrice;
+    const cost = quantity * buyPrice;
+    const grossProfit = revenue - cost;
+    const netProfit = grossProfit - transport.totalRoundTrip;
+    const netMargin = netProfit / cost;
+
+    return {
+      profitable: netMargin >= this.config.minProfitMargin,
+      netMargin,
+      transportCost: transport.totalRoundTrip,
+    };
+  }
+
+  /**
+   * Calculate transport cost between two islands
+   */
+  private calculateRouteTransportCost(
+    fromIsland: ObservableIsland,
+    toIsland: ObservableIsland,
+    cargoVolume: number
+  ): TransportCostBreakdown {
+    // Calculate distance
+    const dx = toIsland.position.x - fromIsland.position.x;
+    const dy = toIsland.position.y - fromIsland.position.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+
+    const config = this.config.shippingCosts;
+    const fixedCost = config.baseVoyageCost;
+    const distanceCost = distance * config.costPerDistanceUnit;
+    const volumeCost = cargoVolume * config.perVolumeHandlingCost;
+    const oneWayCost = fixedCost + distanceCost + volumeCost;
+    const returnCost = distance * config.costPerDistanceUnit * config.emptyReturnMultiplier;
+
+    return {
+      fixedCost,
+      distanceCost,
+      volumeCost,
+      returnCost,
+      oneWayCost,
+      totalRoundTrip: oneWayCost + returnCost,
+    };
   }
 }

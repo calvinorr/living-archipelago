@@ -212,6 +212,16 @@ export interface ShipState {
 }
 
 /**
+ * Shipping cost configuration (Track 02)
+ */
+export interface ShippingCostConfig {
+  baseVoyageCost: number;        // Fixed cost per voyage (default: 10)
+  costPerDistanceUnit: number;   // Per-distance cost (default: 0.1)
+  perVolumeHandlingCost: number; // Per-cargo-volume cost (default: 0.05)
+  emptyReturnMultiplier: number; // Cost multiplier for empty return (default: 0.5)
+}
+
+/**
  * Transport cost breakdown for a voyage (Track 02)
  */
 export interface TransportCostBreakdown {
@@ -353,6 +363,7 @@ export interface SimulationConfig {
   costPerDistanceUnit: number; // Per-distance cost (default: 0.1)
   perVolumeHandlingCost: number; // Per-cargo-volume cost (default: 0.05)
   emptyReturnMultiplier: number; // Cost multiplier for empty return voyage (default: 0.5)
+  shippingCosts: ShippingCostConfig; // Consolidated shipping cost config
 
   // Good-Specific Price Elasticity (Track 05)
   goodMarketConfigs: Record<GoodCategory, GoodMarketConfig>;

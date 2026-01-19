@@ -13,6 +13,7 @@ import type {
   WorldEvent,
   Vector2,
   TransportCostBreakdown,
+  ShippingCostConfig,
   SimulationConfig,
   IslandId,
 } from '../core/types.js';
@@ -70,6 +71,39 @@ export function calculateTransportCost(
   const oneWayCost = fixedCost + distanceCost + volumeCost;
 
   // Return voyage (assuming empty unless planning round trip with backhaul)
+  const returnCost = dist * config.costPerDistanceUnit * config.emptyReturnMultiplier;
+
+  return {
+    fixedCost,
+    distanceCost,
+    volumeCost,
+    returnCost,
+    oneWayCost,
+    totalRoundTrip: oneWayCost + returnCost,
+  };
+}
+
+/**
+ * Calculate transport costs for a voyage (Track 02)
+ * Alternative signature taking IslandState objects directly
+ */
+export function calculateTransportCostFromIslands(
+  origin: IslandState,
+  destination: IslandState,
+  cargoVolume: number,
+  config: ShippingCostConfig
+): TransportCostBreakdown {
+  // Calculate distance between islands using their positions
+  const dx = destination.position.x - origin.position.x;
+  const dy = destination.position.y - origin.position.y;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+
+  const fixedCost = config.baseVoyageCost;
+  const distanceCost = dist * config.costPerDistanceUnit;
+  const volumeCost = cargoVolume * config.perVolumeHandlingCost;
+  const oneWayCost = fixedCost + distanceCost + volumeCost;
+
+  // Return voyage cost (assuming empty unless planning backhaul)
   const returnCost = dist * config.costPerDistanceUnit * config.emptyReturnMultiplier;
 
   return {

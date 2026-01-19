@@ -26,6 +26,7 @@ import type {
   BuildingId,
   Building,
   FishMigrationConfig,
+  ShippingCostConfig,
 } from './types.js';
 import { createShipyard } from '../systems/shipyard.js';
 
@@ -55,6 +56,16 @@ export const DEFAULT_FISH_MIGRATION_CONFIG: FishMigrationConfig = {
   healthyThreshold: 0.6, // Above 60% capacity: can receive migrating fish
   migrationRate: 0.02, // 2% of fish stock can migrate per tick
   minMigrationAmount: 5, // Minimum fish to trigger migration
+};
+
+/**
+ * Default shipping cost configuration (Track 02)
+ */
+export const DEFAULT_SHIPPING_COST_CONFIG: ShippingCostConfig = {
+  baseVoyageCost: 10,
+  costPerDistanceUnit: 0.1,
+  perVolumeHandlingCost: 0.05,
+  emptyReturnMultiplier: 0.5,
 };
 
 /**
@@ -158,6 +169,7 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   costPerDistanceUnit: 0.1, // Per-distance cost
   perVolumeHandlingCost: 0.05, // Per-cargo-volume cost
   emptyReturnMultiplier: 0.5, // Cost multiplier for empty return voyage
+  shippingCosts: DEFAULT_SHIPPING_COST_CONFIG,
 
   // Good-Specific Price Elasticity (Track 05)
   // Reduced elasticity values for more stable prices (~40% reduction)
