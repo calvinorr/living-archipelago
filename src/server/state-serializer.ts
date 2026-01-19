@@ -35,6 +35,13 @@ export interface MarketSnapshot {
   idealStock: Record<string, number>;
 }
 
+export interface BuildingSnapshot {
+  id: string;
+  type: 'warehouse' | 'market' | 'port' | 'workshop';
+  level: number;
+  condition: number;
+}
+
 export interface IslandSnapshot {
   id: string;
   name: string;
@@ -43,6 +50,7 @@ export interface IslandSnapshot {
   population: PopulationSnapshot;
   inventory: Record<string, number>;
   market: MarketSnapshot;
+  buildings: BuildingSnapshot[];
 }
 
 export interface RouteSnapshot {
@@ -50,6 +58,12 @@ export interface RouteSnapshot {
   toIslandId: string;
   etaHours: number;
   progress: number;
+}
+
+export interface CrewSnapshot {
+  count: number;
+  capacity: number;
+  morale: number;
 }
 
 export interface ShipSnapshot {
@@ -63,6 +77,8 @@ export interface ShipSnapshot {
   location:
     | { kind: 'at_island'; islandId: string }
     | { kind: 'at_sea'; position: Vector2; route: RouteSnapshot };
+  crew: CrewSnapshot;
+  condition: number; // 0-1, ship hull condition (Track 08)
 }
 
 export interface EventSnapshot {
@@ -87,6 +103,16 @@ export interface WorldSnapshot {
 }
 
 function serializeIsland(island: IslandState): IslandSnapshot {
+  // Convert buildings Map to array (with fallback for backwards compatibility)
+  const buildings: BuildingSnapshot[] = island.buildings
+    ? Array.from(island.buildings.values()).map((b) => ({
+        id: b.id,
+        type: b.type as BuildingSnapshot['type'],
+        level: b.level,
+        condition: b.condition,
+      }))
+    : [];
+
   return {
     id: island.id,
     name: island.name,
@@ -108,6 +134,7 @@ function serializeIsland(island: IslandState): IslandSnapshot {
       prices: Object.fromEntries(island.market.prices),
       idealStock: Object.fromEntries(island.market.idealStock),
     },
+    buildings,
   };
 }
 
@@ -126,6 +153,10 @@ function serializeShip(ship: ShipState): ShipSnapshot {
           },
         };
 
+  // Fallbacks for backwards compatibility with older ship data
+  const crew = ship.crew ?? { count: 0, capacity: 10, morale: 0.5, wageRate: 0.5, unpaidTicks: 0 };
+  const condition = ship.condition ?? 1.0;
+
   return {
     id: ship.id,
     name: ship.name,
@@ -135,6 +166,12 @@ function serializeShip(ship: ShipState): ShipSnapshot {
     cash: ship.cash,
     cargo: Object.fromEntries(ship.cargo),
     location,
+    crew: {
+      count: crew.count,
+      capacity: crew.capacity,
+      morale: crew.morale,
+    },
+    condition,
   };
 }
 
