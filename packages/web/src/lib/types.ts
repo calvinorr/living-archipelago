@@ -39,6 +39,13 @@ export interface MarketSnapshot {
   idealStock: Record<string, number>;
 }
 
+export interface BuildingSnapshot {
+  id: string;
+  type: 'warehouse' | 'market' | 'port' | 'workshop';
+  level: number;
+  condition: number;
+}
+
 export interface IslandSnapshot {
   id: string;
   name: string;
@@ -47,6 +54,7 @@ export interface IslandSnapshot {
   population: PopulationSnapshot;
   inventory: Record<string, number>;
   market: MarketSnapshot;
+  buildings?: BuildingSnapshot[];
 }
 
 export interface RouteSnapshot {
@@ -54,6 +62,12 @@ export interface RouteSnapshot {
   toIslandId: string;
   etaHours: number;
   progress: number;
+}
+
+export interface CrewSnapshot {
+  count: number;
+  capacity: number;
+  morale: number;
 }
 
 export interface ShipSnapshot {
@@ -67,6 +81,8 @@ export interface ShipSnapshot {
   location:
     | { kind: 'at_island'; islandId: string }
     | { kind: 'at_sea'; position: Vector2; route: RouteSnapshot };
+  crew?: CrewSnapshot;
+  condition?: number; // 0-1, ship hull condition (Track 08)
 }
 
 export interface EventSnapshot {

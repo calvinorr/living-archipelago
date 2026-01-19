@@ -10,6 +10,26 @@ interface ShipCardProps {
   islandNames: Record<string, string>;
 }
 
+function getConditionColor(condition: number): string {
+  if (condition >= 0.7) return 'text-green-600 dark:text-green-400';
+  if (condition >= 0.4) return 'text-yellow-600 dark:text-yellow-400';
+  if (condition >= 0.15) return 'text-orange-600 dark:text-orange-400';
+  return 'text-red-600 dark:text-red-400';
+}
+
+function getConditionBarColor(condition: number): string {
+  if (condition >= 0.7) return 'bg-green-500';
+  if (condition >= 0.4) return 'bg-yellow-500';
+  if (condition >= 0.15) return 'bg-orange-500';
+  return 'bg-red-500';
+}
+
+function getMoraleColor(morale: number): string {
+  if (morale >= 0.6) return 'text-green-600 dark:text-green-400';
+  if (morale >= 0.3) return 'text-yellow-600 dark:text-yellow-400';
+  return 'text-red-600 dark:text-red-400';
+}
+
 export function ShipCard({ ship, islandNames }: ShipCardProps) {
   const location = ship.location;
 
@@ -28,6 +48,10 @@ export function ShipCard({ ship, islandNames }: ShipCardProps) {
   // Calculate total cargo
   const totalCargo = Object.values(ship.cargo).reduce((sum, qty) => sum + qty, 0);
   const cargoPercent = (totalCargo / ship.capacity) * 100;
+
+  // Get condition and crew info
+  const condition = ship.condition ?? 1.0;
+  const crew = ship.crew;
 
   return (
     <Card className="w-full">
@@ -52,6 +76,34 @@ export function ShipCard({ ship, islandNames }: ShipCardProps) {
             <div className="text-xs text-muted-foreground">cash</div>
           </div>
         </div>
+
+        {/* Ship Condition */}
+        <div className="mb-3">
+          <div className="flex justify-between text-xs text-muted-foreground mb-1">
+            <span>Hull Condition</span>
+            <span className={getConditionColor(condition)}>{formatPercent(condition)}</span>
+          </div>
+          <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
+            <div
+              className={`h-full ${getConditionBarColor(condition)} transition-all duration-300`}
+              style={{ width: `${condition * 100}%` }}
+            />
+          </div>
+        </div>
+
+        {/* Crew Info */}
+        {crew && (
+          <div className="mb-3 flex gap-4 text-xs">
+            <div>
+              <span className="text-muted-foreground">Crew: </span>
+              <span>{crew.count}/{crew.capacity}</span>
+            </div>
+            <div>
+              <span className="text-muted-foreground">Morale: </span>
+              <span className={getMoraleColor(crew.morale)}>{formatPercent(crew.morale)}</span>
+            </div>
+          </div>
+        )}
 
         {/* Progress bar for ships at sea */}
         {progress !== null && (

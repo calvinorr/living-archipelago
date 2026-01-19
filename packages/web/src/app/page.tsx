@@ -1,22 +1,68 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useSimulation } from '@/hooks/useSimulation';
 import { SimulationControls } from '@/components/dashboard/SimulationControls';
-import { IslandCard } from '@/components/islands/IslandCard';
+import { CompactIslandGrid } from '@/components/dashboard/CompactIslandCard';
+import { ArbitragePanel } from '@/components/dashboard/ArbitragePanel';
+import { ActivityFeed } from '@/components/dashboard/ActivityFeed';
 import { ShipCard } from '@/components/ships/ShipCard';
-import { PriceChart } from '@/components/charts/PriceChart';
 import { AgentPanel } from '@/components/agents/AgentPanel';
-import { EventFeed } from '@/components/dashboard/EventFeed';
 import { LLMMetricsPanel } from '@/components/llm/LLMMetricsPanel';
+import type { LLMMetricsSummary } from '@/lib/types';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001/ws';
+
+function SectionHeader({ title, count }: { title: string; count?: number }) {
+  return (
+    <h2 className="text-xs font-medium text-muted-foreground uppercase tracking-wider mb-2 flex items-center gap-2">
+      {title}
+      {count !== undefined && (
+        <span className="text-[10px] px-1.5 py-0.5 bg-muted rounded-full">{count}</span>
+      )}
+    </h2>
+  );
+}
+
+function SettingsModal({
+  onClose,
+  llmMetrics,
+  llmEnabled,
+}: {
+  onClose: () => void;
+  llmMetrics: LLMMetricsSummary | null;
+  llmEnabled: boolean;
+}) {
+  return (
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      onClick={onClose}
+    >
+      <div
+        className="bg-card border rounded-lg shadow-xl max-w-md w-full mx-4 max-h-[80vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-4 border-b flex justify-between items-center">
+          <h2 className="text-lg font-semibold">LLM Metrics</h2>
+          <button
+            onClick={onClose}
+            className="text-muted-foreground hover:text-foreground text-xl"
+          >
+            x
+          </button>
+        </div>
+        <div className="p-4">
+          <LLMMetricsPanel metrics={llmMetrics} enabled={llmEnabled} />
+        </div>
+      </div>
+    </div>
+  );
+}
 
 export default function Dashboard() {
   const {
     status,
     world,
-    priceHistory,
     agentDecisions,
     timeScale,
     llmEnabled,
@@ -28,6 +74,8 @@ export default function Dashboard() {
     setSpeed,
     setLLMEnabled,
   } = useSimulation();
+
+  const [showLLMModal, setShowLLMModal] = useState(false);
 
   useEffect(() => {
     connect(WS_URL);
@@ -45,6 +93,7 @@ export default function Dashboard() {
 
   return (
     <div className="h-screen flex flex-col p-4 overflow-hidden">
+      {/* Header Controls */}
       <SimulationControls
         status={status}
         tick={tick}
@@ -52,72 +101,80 @@ export default function Dashboard() {
         gameHour={gameHour}
         timeScale={timeScale}
         llmEnabled={llmEnabled}
+        llmMetrics={llmMetrics}
         onStart={start}
         onPause={pause}
         onResume={resume}
         onSetSpeed={setSpeed}
         onToggleLLM={setLLMEnabled}
+        onShowLLMStats={() => setShowLLMModal(true)}
       />
 
-      <div className="grid grid-cols-12 gap-4 mt-4 flex-1 min-h-0">
-        {/* Left column - Islands */}
-        <div className="col-span-3 flex flex-col min-h-0">
-          <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-2">
-            Islands
-          </h2>
-          <div className="flex-1 overflow-y-auto space-y-3 pr-2">
-            {world?.islands.map((island) => (
-              <IslandCard key={island.id} island={island} />
-            ))}
-            {!world && (
-              <div className="text-muted-foreground text-sm p-4 bg-card rounded-lg border">
-                Connecting to simulation server...
-              </div>
-            )}
-          </div>
+      {/* Main content */}
+      <div className="flex-1 flex flex-col gap-3 mt-3 min-h-0">
+        {/* Islands row */}
+        <section>
+          <SectionHeader title="Islands" count={world?.islands?.length} />
+          {world?.islands ? (
+            <CompactIslandGrid islands={world.islands} />
+          ) : (
+            <div className="text-muted-foreground text-sm p-4 bg-card rounded-lg border">
+              Connecting to simulation server...
+            </div>
+          )}
+        </section>
+
+        {/* Middle row - Trade Routes + Activity + Agents */}
+        <div className="grid grid-cols-3 gap-3">
+          <section>
+            <SectionHeader title="Trade Routes" />
+            <ArbitragePanel islands={world?.islands ?? []} maxItems={5} />
+          </section>
+
+          <section>
+            <SectionHeader title="Activity" />
+            <ActivityFeed
+              events={world?.events ?? []}
+              decisions={agentDecisions}
+              ships={world?.ships ?? []}
+              islandNames={islandNames}
+              currentTick={tick}
+              maxItems={6}
+            />
+          </section>
+
+          <section>
+            <SectionHeader title="AI Agents" />
+            <div className="max-h-[220px] overflow-y-auto">
+              <AgentPanel decisions={agentDecisions.slice(0, 5)} />
+            </div>
+          </section>
         </div>
 
-        {/* Middle column - Charts & Ships */}
-        <div className="col-span-6 flex flex-col min-h-0">
-          <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-2">
-            Market Data
-          </h2>
-          <PriceChart
-            history={priceHistory}
-            islands={world?.islands.map((i) => ({ id: i.id, name: i.name })) ?? []}
-          />
-
-          <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mt-4 mb-2">
-            Ships & Events
-          </h2>
-          <div className="grid grid-cols-2 gap-2">
+        {/* Fleet row */}
+        <section className="flex-1 min-h-0">
+          <SectionHeader title="Fleet" count={world?.ships?.length} />
+          <div className="grid grid-cols-3 gap-3">
             {world?.ships.map((ship) => (
               <ShipCard key={ship.id} ship={ship} islandNames={islandNames} />
             ))}
+            {!world?.ships?.length && (
+              <div className="col-span-3 text-muted-foreground text-sm p-4 bg-card rounded-lg border text-center">
+                No ships in the simulation
+              </div>
+            )}
           </div>
-          <div className="mt-2">
-            <EventFeed events={world?.events ?? []} />
-          </div>
-        </div>
-
-        {/* Right column - LLM & Agents */}
-        <div className="col-span-3 flex flex-col min-h-0 gap-4">
-          <div>
-            <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-2">
-              LLM Usage
-            </h2>
-            <LLMMetricsPanel metrics={llmMetrics} enabled={llmEnabled} />
-          </div>
-          <div className="flex-1 min-h-0 flex flex-col">
-            <h2 className="text-sm font-medium text-muted-foreground uppercase tracking-wider mb-2">
-              AI Agents
-            </h2>
-            <div className="flex-1 overflow-y-auto">
-              <AgentPanel decisions={agentDecisions} />
-            </div>
-          </div>
-        </div>
+        </section>
       </div>
+
+      {/* LLM Metrics Modal */}
+      {showLLMModal && (
+        <SettingsModal
+          onClose={() => setShowLLMModal(false)}
+          llmMetrics={llmMetrics}
+          llmEnabled={llmEnabled}
+        />
+      )}
     </div>
   );
 }
