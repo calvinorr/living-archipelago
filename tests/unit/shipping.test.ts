@@ -136,6 +136,15 @@ function createTestShip(overrides: Partial<ShipState> = {}): ShipState {
     cargo: new Map(),
     location: { kind: 'at_island', islandId: 'island-a' },
     cumulativeTransportCosts: 0,
+    crew: {
+      count: 10,
+      capacity: 20,
+      morale: 0.8,
+      wageRate: 0.5,
+      unpaidTicks: 0,
+    },
+    condition: 1.0,
+    totalDistanceTraveled: 0,
     ...overrides,
   };
 }
@@ -446,5 +455,105 @@ describe('transport cost impact on trade economics', () => {
 
     // Fixed costs spread over more units = lower per-unit cost
     expect(largePerUnit).toBeLessThan(smallPerUnit);
+  });
+});
+
+describe('ship maintenance system (Track 08)', () => {
+  const islands = createTestIslands();
+  const goods = createGoodsMap(MVP_GOODS);
+  const config = DEFAULT_CONFIG;
+
+  it('should apply wear during voyage', () => {
+    const ship = createTestShip({
+      condition: 1.0,
+      location: {
+        kind: 'at_sea',
+        position: { x: 50, y: 0 },
+        route: {
+          fromIslandId: 'island-a',
+          toIslandId: 'island-b',
+          etaHours: 5,
+          progress: 0.5,
+        },
+      },
+    });
+
+    const { newShip, wearApplied } = updateShip(ship, islands, goods, [], 1, config);
+
+    expect(wearApplied).toBeGreaterThan(0);
+    expect(newShip.condition).toBeLessThan(1.0);
+    expect(newShip.totalDistanceTraveled).toBeGreaterThan(0);
+  });
+
+  it('should not apply wear when docked at island', () => {
+    const ship = createTestShip({
+      condition: 0.8,
+      location: { kind: 'at_island', islandId: 'island-a' },
+    });
+
+    const { newShip, wearApplied } = updateShip(ship, islands, goods, [], 1, config);
+
+    expect(wearApplied).toBe(0);
+    expect(newShip.condition).toBe(0.8);
+  });
+
+  it('should reduce speed based on condition', () => {
+    const goodShip = createTestShip({
+      condition: 1.0,
+      location: {
+        kind: 'at_sea',
+        position: { x: 0, y: 0 },
+        route: {
+          fromIslandId: 'island-a',
+          toIslandId: 'island-b',
+          etaHours: 10,
+          progress: 0,
+        },
+      },
+    });
+
+    const damagedShip = createTestShip({
+      condition: 0.0, // Worst condition
+      location: {
+        kind: 'at_sea',
+        position: { x: 0, y: 0 },
+        route: {
+          fromIslandId: 'island-a',
+          toIslandId: 'island-b',
+          etaHours: 10,
+          progress: 0,
+        },
+      },
+    });
+
+    const { newShip: goodResult } = updateShip(goodShip, islands, goods, [], 1, config);
+    const { newShip: damagedResult } = updateShip(damagedShip, islands, goods, [], 1, config);
+
+    // Damaged ship should make less progress due to speed penalty
+    if (goodResult.location.kind === 'at_sea' && damagedResult.location.kind === 'at_sea') {
+      expect(damagedResult.location.route.progress).toBeLessThan(
+        goodResult.location.route.progress
+      );
+    }
+  });
+
+  it('should track cumulative distance traveled', () => {
+    const ship = createTestShip({
+      totalDistanceTraveled: 100,
+      location: {
+        kind: 'at_sea',
+        position: { x: 50, y: 0 },
+        route: {
+          fromIslandId: 'island-a',
+          toIslandId: 'island-b',
+          etaHours: 5,
+          progress: 0.5,
+        },
+      },
+    });
+
+    const { newShip } = updateShip(ship, islands, goods, [], 1, config);
+
+    expect(newShip.totalDistanceTraveled).toBeGreaterThan(100);
   });
 });

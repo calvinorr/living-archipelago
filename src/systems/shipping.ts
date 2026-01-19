@@ -17,6 +17,8 @@ import type {
   IslandId,
 } from '../core/types.js';
 
+import { getWarehouseEffect } from './buildings.js';
+
 /**
  * Calculate distance between two points
  */
@@ -119,14 +121,157 @@ function getSpoilageModifier(events: WorldEvent[]): number {
 }
 
 /**
+ * Check if there's an active storm affecting the ship
+ */
+function isInStorm(shipId: string, events: WorldEvent[]): boolean {
+  for (const event of events) {
+    if (event.type === 'storm') {
+      if (event.targetId === shipId || event.targetId === 'global') {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Calculate ship speed modifier based on condition (Track 08)
+ * Lower condition = slower ship
+ */
+function getConditionSpeedModifier(condition: number, config: SimulationConfig): number {
+  // Linear penalty: at condition 0, speed reduced by speedConditionPenalty
+  // at condition 1, no penalty
+  const penalty = (1 - condition) * config.maintenanceConfig.speedConditionPenalty;
+  return 1 - penalty;
+}
+
+/**
+ * Calculate wear on ship condition during voyage (Track 08)
+ */
+function calculateWear(
+  ship: ShipState,
+  distanceTraveled: number,
+  events: WorldEvent[],
+  config: SimulationConfig,
+  dt: number
+): number {
+  const mc = config.maintenanceConfig;
+
+  // Base wear from being at sea
+  let wear = mc.baseWearRate * dt;
+
+  // Distance-based wear
+  wear += mc.distanceWearRate * distanceTraveled;
+
+  // Storm multiplier
+  if (isInStorm(ship.id, events)) {
+    wear *= mc.stormWearMultiplier;
+  }
+
+  return wear;
+}
+
+/**
+ * Repair ship at island (Track 08)
+ * Consumes timber and coins to restore condition
+ */
+export function repairShip(
+  ship: ShipState,
+  island: IslandState,
+  config: SimulationConfig,
+  dt: number
+): {
+  newShip: ShipState;
+  newIsland: IslandState;
+  repaired: number;
+  timberUsed: number;
+  coinsUsed: number;
+} {
+  const mc = config.maintenanceConfig;
+
+  // Can't repair if already at full condition
+  if (ship.condition >= 1.0) {
+    return { newShip: ship, newIsland: island, repaired: 0, timberUsed: 0, coinsUsed: 0 };
+  }
+
+  // Calculate max repair possible this tick
+  const maxRepairFromTime = mc.repairRateAtIsland * dt;
+  const conditionNeeded = 1.0 - ship.condition;
+  const desiredRepair = Math.min(maxRepairFromTime, conditionNeeded);
+
+  // Convert to repair points (1 point = 0.01 condition)
+  const repairPoints = desiredRepair * 100;
+
+  // Check available resources
+  const timberAvailable = island.inventory.get('timber') ?? 0;
+  const coinsAvailable = ship.cash;
+
+  // Determine actual repair based on available resources
+  const timberLimitedPoints = (timberAvailable / mc.repairTimberCostPerPoint);
+  const coinsLimitedPoints = (coinsAvailable / mc.repairCoinCostPerPoint);
+  const actualRepairPoints = Math.min(repairPoints, timberLimitedPoints, coinsLimitedPoints);
+
+  if (actualRepairPoints <= 0) {
+    return { newShip: ship, newIsland: island, repaired: 0, timberUsed: 0, coinsUsed: 0 };
+  }
+
+  const actualRepair = actualRepairPoints / 100;
+  const timberUsed = actualRepairPoints * mc.repairTimberCostPerPoint;
+  const coinsUsed = actualRepairPoints * mc.repairCoinCostPerPoint;
+
+  // Update ship condition and cash
+  const newShip: ShipState = {
+    ...ship,
+    condition: Math.min(1.0, ship.condition + actualRepair),
+    cash: ship.cash - coinsUsed,
+  };
+
+  // Update island timber inventory
+  const newInventory = new Map(island.inventory);
+  newInventory.set('timber', timberAvailable - timberUsed);
+  const newIsland: IslandState = {
+    ...island,
+    inventory: newInventory,
+  };
+
+  return { newShip, newIsland, repaired: actualRepair, timberUsed, coinsUsed };
+}
+
+/**
+ * Check if ship sinks due to critical condition (Track 08)
+ * Returns true if ship sinks
+ */
+export function checkShipSinking(
+  ship: ShipState,
+  config: SimulationConfig,
+  rng: () => number // Random number generator
+): boolean {
+  const mc = config.maintenanceConfig;
+
+  // Only check sinking if below critical threshold
+  if (ship.condition >= mc.criticalConditionThreshold) {
+    return false;
+  }
+
+  // Risk increases as condition approaches 0
+  const severityMultiplier = 1 - (ship.condition / mc.criticalConditionThreshold);
+  const sinkingChance = mc.sinkingChancePerTick * severityMultiplier;
+
+  return rng() < sinkingChance;
+}
+
+/**
  * Apply spoilage to perishable cargo
- * Formula: cargo_{t+1} = cargo_t * exp(-spoilage_rate * dt * weather_multiplier)
+ * Formula: cargo_{t+1} = cargo_t * exp(-spoilage_rate * dt * weather_multiplier * warehouse_multiplier)
+ *
+ * @param warehouseMultiplier - Reduction from warehouse buildings (0-1, lower = less spoilage)
  */
 function applySpoilage(
   cargo: Map<GoodId, number>,
   goods: Map<GoodId, GoodDefinition>,
   events: WorldEvent[],
-  dt: number
+  dt: number,
+  warehouseMultiplier: number = 1
 ): { newCargo: Map<GoodId, number>; spoilageLoss: Map<GoodId, number> } {
   const newCargo = new Map<GoodId, number>();
   const spoilageLoss = new Map<GoodId, number>();
@@ -140,9 +285,9 @@ function applySpoilage(
       continue;
     }
 
-    // Apply exponential decay
+    // Apply exponential decay with warehouse reduction
     const decayFactor = Math.exp(
-      -goodDef.spoilageRatePerHour * dt * weatherMultiplier
+      -goodDef.spoilageRatePerHour * dt * weatherMultiplier * warehouseMultiplier
     );
     const newQuantity = quantity * decayFactor;
     const loss = quantity - newQuantity;
@@ -157,22 +302,29 @@ function applySpoilage(
 }
 
 /**
- * Update ship movement
- * Returns new ship state with updated location
+ * Update ship movement (Track 08: includes condition-based speed)
+ * Returns new ship state with updated location and distance traveled
  */
 export function updateShipMovement(
   ship: ShipState,
   islands: Map<string, IslandState>,
   events: WorldEvent[],
-  dt: number
-): { newLocation: ShipLocation; arrived: boolean } {
+  dt: number,
+  config?: SimulationConfig
+): { newLocation: ShipLocation; arrived: boolean; distanceTraveled: number } {
   if (ship.location.kind === 'at_island') {
-    return { newLocation: ship.location, arrived: false };
+    return { newLocation: ship.location, arrived: false, distanceTraveled: 0 };
   }
 
   const { route, position } = ship.location;
-  const speedModifier = getSpeedModifier(ship.id, events);
-  const effectiveSpeed = ship.speed * speedModifier;
+  const eventSpeedModifier = getSpeedModifier(ship.id, events);
+
+  // Apply condition-based speed penalty (Track 08)
+  const conditionModifier = config
+    ? getConditionSpeedModifier(ship.condition, config)
+    : 1;
+
+  const effectiveSpeed = ship.speed * eventSpeedModifier * conditionModifier;
 
   // Update ETA
   const newEta = Math.max(0, route.etaHours - dt);
@@ -184,6 +336,7 @@ export function updateShipMovement(
     return {
       newLocation: { kind: 'at_island', islandId: route.fromIslandId },
       arrived: false,
+      distanceTraveled: 0,
     };
   }
 
@@ -210,6 +363,7 @@ export function updateShipMovement(
     return {
       newLocation: { kind: 'at_island', islandId: route.toIslandId },
       arrived: true,
+      distanceTraveled,
     };
   }
 
@@ -224,6 +378,7 @@ export function updateShipMovement(
       },
     },
     arrived: false,
+    distanceTraveled,
   };
 }
 
@@ -284,7 +439,7 @@ export function startVoyage(
 }
 
 /**
- * Update ship state including movement, spoilage, and transport costs (Track 02)
+ * Update ship state including movement, spoilage, transport costs (Track 02), and wear (Track 08)
  */
 export function updateShip(
   ship: ShipState,
@@ -299,17 +454,44 @@ export function updateShip(
   arrivedAt: string | null;
   spoilageLoss: Map<GoodId, number>;
   transportCost: number;
+  wearApplied: number;
 } {
-  // Apply spoilage to cargo
-  const { newCargo, spoilageLoss } = applySpoilage(ship.cargo, goods, events, dt);
+  // Calculate warehouse spoilage reduction if ship is at an island with warehouses
+  let warehouseMultiplier = 1;
+  if (ship.location.kind === 'at_island' && config) {
+    const island = islands.get(ship.location.islandId);
+    if (island) {
+      const warehouseEffect = getWarehouseEffect(island, config.buildingsConfig);
+      warehouseMultiplier = warehouseEffect.spoilageReduction;
+    }
+  }
 
-  // Update movement
-  const { newLocation, arrived } = updateShipMovement(ship, islands, events, dt);
+  // Apply spoilage to cargo (reduced by warehouse if at island)
+  const { newCargo, spoilageLoss } = applySpoilage(ship.cargo, goods, events, dt, warehouseMultiplier);
+
+  // Update movement (now returns distance traveled)
+  const { newLocation, arrived, distanceTraveled } = updateShipMovement(
+    ship,
+    islands,
+    events,
+    dt,
+    config
+  );
 
   let transportCost = 0;
   let lastVoyageCost = ship.lastVoyageCost;
   let cumulativeTransportCosts = ship.cumulativeTransportCosts;
   let cash = ship.cash;
+  let condition = ship.condition;
+  let totalDistanceTraveled = ship.totalDistanceTraveled;
+  let wearApplied = 0;
+
+  // Apply wear only when at sea (Track 08)
+  if (ship.location.kind === 'at_sea' && config) {
+    wearApplied = calculateWear(ship, distanceTraveled, events, config, dt);
+    condition = Math.max(0, condition - wearApplied);
+    totalDistanceTraveled += distanceTraveled;
+  }
 
   // Deduct transport cost on voyage completion (Track 02)
   if (arrived && ship.location.kind === 'at_sea' && config) {
@@ -338,12 +520,14 @@ export function updateShip(
     cash,
     lastVoyageCost,
     cumulativeTransportCosts,
+    condition,
+    totalDistanceTraveled,
   };
 
   const arrivedAt =
     arrived && newLocation.kind === 'at_island' ? newLocation.islandId : null;
 
-  return { newShip, arrived, arrivedAt, spoilageLoss, transportCost };
+  return { newShip, arrived, arrivedAt, spoilageLoss, transportCost, wearApplied };
 }
 
 /**
@@ -374,7 +558,7 @@ export function calculateRemainingCapacity(
 }
 
 /**
- * Get ship status for UI/agents
+ * Get ship status for UI/agents (Track 08: includes condition)
  */
 export function getShipStatus(
   ship: ShipState,
@@ -389,9 +573,17 @@ export function getShipStatus(
   cargoValue: number;
   cargoVolume: number;
   remainingCapacity: number;
+  condition: number;
+  conditionStatus: 'good' | 'fair' | 'poor' | 'critical';
 } {
   const cargoVolume = calculateCargoVolume(ship.cargo, goods);
   const remainingCapacity = ship.capacity - cargoVolume;
+
+  // Determine condition status
+  let conditionStatus: 'good' | 'fair' | 'poor' | 'critical' = 'good';
+  if (ship.condition < 0.15) conditionStatus = 'critical';
+  else if (ship.condition < 0.4) conditionStatus = 'poor';
+  else if (ship.condition < 0.7) conditionStatus = 'fair';
 
   // Calculate cargo value (using origin island prices if at sea)
   let cargoValue = 0;
@@ -421,6 +613,8 @@ export function getShipStatus(
       cargoValue,
       cargoVolume,
       remainingCapacity,
+      condition: ship.condition,
+      conditionStatus,
     };
   }
 
@@ -436,5 +630,7 @@ export function getShipStatus(
     cargoValue,
     cargoVolume,
     remainingCapacity,
+    condition: ship.condition,
+    conditionStatus,
   };
 }
