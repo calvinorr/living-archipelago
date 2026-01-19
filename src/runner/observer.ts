@@ -330,7 +330,7 @@ function printShipTable(state: WorldState, verbosity: VerbosityLevel): void {
 
   console.log(`${ANSI.bold}Ships:${ANSI.reset}`);
 
-  for (const [_shipId, ship] of state.ships) {
+  for (const ship of state.ships.values()) {
     const location = formatShipLocation(ship.location as { kind: string; islandId?: string; route?: { toIslandId: string; progress: number } });
     const cashStr = `${ANSI.yellow}$${ship.cash.toFixed(0)}${ANSI.reset}`;
 

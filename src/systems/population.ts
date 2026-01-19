@@ -290,17 +290,14 @@ function clampAndNormalize(
   // Iteratively clamp and redistribute
   for (let iter = 0; iter < 10; iter++) {
     let total = 0;
-    let clamped = 0;
     let unclamped = 0;
 
     // First pass: clamp and count
     for (const sector of SECTORS) {
       if (result[sector] > laborConfig.maxSectorShare) {
         result[sector] = laborConfig.maxSectorShare;
-        clamped++;
       } else if (result[sector] < laborConfig.minSectorShare) {
         result[sector] = laborConfig.minSectorShare;
-        clamped++;
       } else {
         unclamped++;
       }

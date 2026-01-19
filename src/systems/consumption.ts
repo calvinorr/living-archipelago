@@ -145,8 +145,8 @@ function consumeFoodElastic(
   const fishConsumed = Math.min(fishAvailable, demand.fishDemand);
 
   // Handle unfulfilled demand: try to substitute
-  let grainDeficit = demand.grainDemand - grainConsumed;
-  let fishDeficit = demand.fishDemand - fishConsumed;
+  const grainDeficit = demand.grainDemand - grainConsumed;
+  const fishDeficit = demand.fishDemand - fishConsumed;
 
   // If grain is short, try to get more fish
   const extraFishAvailable = fishAvailable - fishConsumed;

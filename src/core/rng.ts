@@ -51,7 +51,7 @@ export class SeededRNG {
    * Generate next random uint32
    */
   private next(): number {
-    let s0 = this.state.s0;
+    const s0 = this.state.s0;
     let s1 = this.state.s1;
 
     const result = (s0 + s1) >>> 0;

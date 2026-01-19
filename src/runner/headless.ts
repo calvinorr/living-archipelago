@@ -144,12 +144,13 @@ function formatDecision(result: AgentTickResult): string {
   if (decision.actions.length > 0) {
     for (const action of decision.actions) {
       switch (action.type) {
-        case 'trade':
+        case 'trade': {
           const txs = action.transactions.map((tx) =>
             `${tx.quantity > 0 ? 'BUY' : 'SELL'} ${Math.abs(tx.quantity)} ${tx.goodId}`
           );
           parts.push(`TRADE(${action.shipId}@${action.islandId}: ${txs.join(', ')})`);
           break;
+        }
         case 'navigate':
           parts.push(`NAVIGATE(${action.shipId}->${action.destinationId})`);
           break;

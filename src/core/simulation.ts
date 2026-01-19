@@ -13,7 +13,7 @@ import type {
   ShipId,
 } from './types.js';
 import { SeededRNG, hashState } from './rng.js';
-import { cloneWorldState, tickToGameTime, DEFAULT_CONFIG } from './world.js';
+import { cloneWorldState, tickToGameTime, DEFAULT_CONFIG, initializeWorld } from './world.js';
 
 import { updateEcology, type HarvestData } from '../systems/ecology.js';
 import { updateProduction, type ProductionResult } from '../systems/production.js';
@@ -237,7 +237,7 @@ export class Simulation {
     // 8-9. Ship movement, spoilage, arrival, and transport costs (Track 02)
     // =========================================================================
     for (const [shipId, ship] of next.ships) {
-      const { newShip, arrived, arrivedAt, spoilageLoss: _spoilageLoss } = updateShip(
+      const { newShip, arrived, arrivedAt } = updateShip(
         ship,
         next.islands,
         next.goods,
@@ -405,7 +405,6 @@ export class Simulation {
  * Returns true if two runs with same seed produce identical results
  */
 export function verifyDeterminism(seed: number, ticks: number): boolean {
-  const { initializeWorld } = require('./world.js');
 
   const state1 = initializeWorld(seed);
   const state2 = initializeWorld(seed);
