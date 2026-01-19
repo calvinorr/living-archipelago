@@ -18,6 +18,17 @@ import { serializeWorldState } from './state-serializer.js';
 import { createDatabase, SimulationDatabase, getTradeStats, getLLMUsage, getEcosystemHealth, getPriceHistory, getPriceVolatility, getPopulationTrends } from '../storage/index.js';
 import type { TradeRecord } from '../storage/index.js';
 import { getRunSummary, getEcosystemReports, getMarketEfficiencyMetrics, getTradeRouteAnalysis } from '../storage/analyst-queries.js';
+import { EconomicAnalyst } from '../analyst/analyst-agent.js';
+
+// Global analyst instance
+let analyst: EconomicAnalyst | null = null;
+
+function getAnalyst(): EconomicAnalyst {
+  if (!analyst) {
+    analyst = new EconomicAnalyst({ rateLimiterPreset: 'balanced', debug: true });
+  }
+  return analyst;
+}
 
 // ============================================================================
 // Types
@@ -669,6 +680,122 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
       prices: Object.fromEntries(prices),
       population: Object.fromEntries(population),
     }));
+    return;
+  }
+
+  // Analyze run with AI (POST)
+  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+\/analyze$/) && req.method === 'POST') {
+    if (!state.database) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Database not enabled' }));
+      return;
+    }
+    if (!HAS_API_KEY) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }));
+      return;
+    }
+
+    const runId = parseInt(url.pathname.split('/')[4], 10);
+    console.log(`[Analyst] Starting analysis for run ${runId}`);
+
+    const analystInstance = getAnalyst();
+    analystInstance.analyzeRun(state.database, runId)
+      .then((analysis) => {
+        if (!analysis) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Analysis failed' }));
+          return;
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          runId: analysis.runId,
+          analyzedAt: analysis.analyzedAt.toISOString(),
+          healthScore: analysis.healthScore,
+          issues: analysis.issues,
+          recommendations: analysis.recommendations,
+          summary: analysis.summary,
+        }));
+      })
+      .catch((error) => {
+        console.error('[Analyst] Analysis error:', error);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Analysis failed: ' + (error instanceof Error ? error.message : 'Unknown error') }));
+      });
+    return;
+  }
+
+  // Chat with analyst (POST)
+  if (url.pathname === '/api/analyst/chat' && req.method === 'POST') {
+    if (!HAS_API_KEY) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }));
+      return;
+    }
+
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk.toString();
+    });
+    req.on('end', () => {
+      try {
+        const { message, runId } = JSON.parse(body);
+        if (!message) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Message is required' }));
+          return;
+        }
+
+        const analystInstance = getAnalyst();
+        analystInstance.chat(message, state.database || undefined, runId)
+          .then((response) => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ response: response || 'No response generated' }));
+          })
+          .catch((error) => {
+            console.error('[Analyst] Chat error:', error);
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Chat failed' }));
+          });
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+      }
+    });
+    return;
+  }
+
+  // Apply improvement (POST)
+  if (url.pathname === '/api/analyst/improvements/apply' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk.toString();
+    });
+    req.on('end', () => {
+      try {
+        const { configPath, newValue } = JSON.parse(body);
+        if (!configPath || newValue === undefined) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'configPath and newValue are required' }));
+          return;
+        }
+
+        // For now, just acknowledge the request
+        // Full implementation would write to config file
+        console.log(`[Analyst] Improvement requested: ${configPath} = ${JSON.stringify(newValue)}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: true,
+          configPath,
+          newValue,
+          message: 'Improvement recorded. Apply changes to config manually for now.',
+        }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+      }
+    });
     return;
   }
 
