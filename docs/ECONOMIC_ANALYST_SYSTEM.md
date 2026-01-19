@@ -2,7 +2,7 @@
 
 An AI-powered economic modeling expert that analyzes simulation data, identifies model weaknesses, and suggests improvements that can be applied to the game logic.
 
-## Status: Planning Complete
+## Status: Implementation Complete
 
 **Created**: 2026-01-19
 **Last Updated**: 2026-01-19
@@ -47,10 +47,10 @@ User clicks "Analyze"
 ## Implementation Phases
 
 ### Phase 1: Data Aggregation & API
-- [ ] Create `src/storage/analyst-queries.ts` - Advanced analytics queries
-- [ ] Create `src/server/analyst-api.ts` - REST endpoints
-- [ ] Add analyst database tables (analyses, issues, improvements)
-- [ ] Implement `getRunSummary()` aggregation
+- [x] Create `src/storage/analyst-queries.ts` - Advanced analytics queries
+- [x] Add REST endpoints to `src/server/api-server.ts`
+- [ ] Add analyst database tables (analyses, issues, improvements) - future
+- [x] Implement `getRunSummary()` aggregation
 
 **Key metrics to aggregate:**
 - Trade profitability by route
@@ -60,10 +60,10 @@ User clicks "Analyze"
 - Agent ROI
 
 ### Phase 2: AI Analyst Backend
-- [ ] Create `src/analyst/analyst-agent.ts` - Main analysis logic
-- [ ] Create `src/analyst/prompts.ts` - Specialized prompts
-- [ ] Create `src/analyst/improvement-generator.ts` - Generate changes
-- [ ] Implement diagnosis, explanation, recommendation capabilities
+- [x] Create `src/analyst/analyst-agent.ts` - Main analysis logic
+- [x] Create `src/analyst/prompts.ts` - Specialized prompts
+- [x] Implement diagnosis, explanation, recommendation capabilities
+- [ ] Create `src/analyst/improvement-generator.ts` - Generate changes (partial)
 
 **Analysis capabilities:**
 1. **Diagnose** - Identify model issues from data patterns
@@ -72,11 +72,13 @@ User clicks "Analyze"
 4. **Generate** - Create config patches or code diffs
 
 ### Phase 3: Frontend Analyst Page
-- [ ] Create `/analyst` route and page
-- [ ] Create `AnalystChat.tsx` - Chat interface
-- [ ] Create `AnalysisReport.tsx` - Results display
-- [ ] Create `ImprovementQueue.tsx` - Pending changes
-- [ ] Create `useAnalyst.ts` - State management
+- [x] Create `/analyst` route and page
+- [x] Create `AnalystChat.tsx` - Chat interface
+- [x] Create `AnalysisReport.tsx` - Results display
+- [x] Create `ImprovementQueue.tsx` - Pending changes
+- [x] Create `useAnalyst.ts` - State management
+- [x] Create `RunSelector.tsx` - Run selection component
+- [x] Create `analyst-types.ts` - TypeScript types
 
 **UI Components:**
 - Run selector (list completed runs)
@@ -87,20 +89,20 @@ User clicks "Analyze"
 - Improvement preview with diff view
 
 ### Phase 4: Improvement Application
-- [ ] Create `src/analyst/config-patcher.ts` - Apply config changes
-- [ ] Implement diff preview for changes
-- [ ] Add version tracking for iterations
-- [ ] Track effectiveness across runs
+- [x] Create `src/analyst/config-patcher.ts` - Apply config changes
+- [x] Implement diff preview for changes
+- [ ] Add version tracking for iterations - future
+- [ ] Track effectiveness across runs - future
 
 **Change types:**
 1. **Config changes** - Modify SimulationConfig values (safe to auto-apply)
 2. **Code suggestions** - Logic changes (require review, shown as diff)
 
 ### Phase 5: Integration & Polish
-- [ ] Add analyst button to main dashboard
-- [ ] Export analysis reports as markdown
-- [ ] Track improvement history
-- [ ] Add effectiveness metrics (before/after comparison)
+- [x] Add analyst button to main dashboard
+- [ ] Export analysis reports as markdown - future
+- [ ] Track improvement history - future
+- [ ] Add effectiveness metrics (before/after comparison) - future
 
 ## API Endpoints
 

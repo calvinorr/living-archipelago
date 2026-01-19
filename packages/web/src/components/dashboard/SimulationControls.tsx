@@ -1,6 +1,7 @@
 'use client';
 
-import { Play, Pause, Bot, Zap } from 'lucide-react';
+import { Play, Pause, Bot, Zap, BarChart3 } from 'lucide-react';
+import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import type { SimulationStatus, LLMMetricsSummary } from '@/lib/types';
 import { formatGameTime } from '@/lib/utils';
@@ -137,6 +138,18 @@ export function SimulationControls({
               <span className="font-mono">${(llmMetrics?.totalCostUsd ?? 0).toFixed(3)}</span>
             </button>
           </div>
+
+          {/* Divider */}
+          <div className="w-px h-6 bg-border" />
+
+          {/* Analyst Link */}
+          <Link
+            href="/analyst"
+            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-md bg-purple-600 text-white hover:bg-purple-700 transition-colors"
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            Analyst
+          </Link>
         </div>
       </div>
     </header>
