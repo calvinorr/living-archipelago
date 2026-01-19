@@ -9,6 +9,7 @@ import { ActivityFeed } from '@/components/dashboard/ActivityFeed';
 import { ShipCard } from '@/components/ships/ShipCard';
 import { AgentPanel } from '@/components/agents/AgentPanel';
 import { LLMMetricsPanel } from '@/components/llm/LLMMetricsPanel';
+import { EconomicsPanel } from '@/components/dashboard/EconomicsPanel';
 import type { LLMMetricsSummary } from '@/lib/types';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:3001/ws';
@@ -64,6 +65,7 @@ export default function Dashboard() {
     status,
     world,
     agentDecisions,
+    economyHistory,
     timeScale,
     llmEnabled,
     llmMetrics,
@@ -150,6 +152,17 @@ export default function Dashboard() {
             </div>
           </section>
         </div>
+
+        {/* Economics Analytics */}
+        <section>
+          <SectionHeader title="Economic Analytics" />
+          <EconomicsPanel
+            islands={world?.islands ?? []}
+            ships={world?.ships ?? []}
+            economyHistory={economyHistory}
+            taxCollected={world?.economyMetrics?.totalTaxCollected ?? 0}
+          />
+        </section>
 
         {/* Fleet row */}
         <section className="flex-1 min-h-0">

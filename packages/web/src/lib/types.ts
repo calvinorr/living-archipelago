@@ -94,6 +94,11 @@ export interface EventSnapshot {
   remainingHours: number;
 }
 
+export interface EconomyMetricsSnapshot {
+  taxCollectedThisTick: number;
+  totalTaxCollected: number;
+}
+
 export interface AgentDecision {
   agentId: string;
   agentName: string;
@@ -118,6 +123,7 @@ export interface WorldSnapshot {
   islands: IslandSnapshot[];
   ships: ShipSnapshot[];
   events: EventSnapshot[];
+  economyMetrics?: EconomyMetricsSnapshot;
 }
 
 export interface PriceHistoryPoint {
@@ -125,6 +131,15 @@ export interface PriceHistoryPoint {
   gameDay: number;
   gameHour: number;
   prices: Record<string, Record<string, number>>; // islandId -> goodId -> price
+}
+
+export interface EconomyHistoryPoint {
+  tick: number;
+  gameDay: number;
+  totalTaxCollected: number;
+  totalMoneySupply: number; // Sum of all ship cash
+  avgFishStock: number; // Average fish stock ratio across islands
+  tradeVolume: number; // Approximate trades this tick
 }
 
 export type SimulationStatus = 'disconnected' | 'connecting' | 'connected' | 'running' | 'paused';
@@ -135,6 +150,7 @@ export interface SimulationState {
   priceHistory: PriceHistoryPoint[];
   agentDecisions: AgentDecision[];
   timeScale: number;
+  economyHistory: EconomyHistoryPoint[];
 }
 
 // WebSocket message types

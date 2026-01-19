@@ -7,6 +7,7 @@ import type {
   WorldSnapshot,
   AgentDecision,
   PriceHistoryPoint,
+  EconomyHistoryPoint,
   ServerMessage,
   ClientMessage,
   LLMMetricsSummary,
@@ -15,6 +16,7 @@ import type {
 
 const MAX_HISTORY_POINTS = 500;
 const MAX_AGENT_DECISIONS = 50;
+const MAX_ECONOMY_HISTORY = 100;
 
 interface SimulationStore extends SimulationState {
   // Connection
@@ -37,6 +39,7 @@ interface SimulationStore extends SimulationState {
   _setWorld: (world: WorldSnapshot) => void;
   _addAgentDecision: (decision: AgentDecision) => void;
   _addPriceHistoryPoint: (world: WorldSnapshot) => void;
+  _addEconomyHistoryPoint: (world: WorldSnapshot) => void;
   _setLLMStatus: (enabled: boolean) => void;
   _setLLMMetrics: (metrics: LLMMetricsSummary) => void;
   _addLLMCall: (call: LLMCallRecord) => void;
@@ -50,6 +53,7 @@ export const useSimulation = create<SimulationStore>((set, get) => ({
   status: 'disconnected',
   world: null,
   priceHistory: [],
+  economyHistory: [],
   agentDecisions: [],
   timeScale: 1,
   llmEnabled: false,
@@ -81,6 +85,7 @@ export const useSimulation = create<SimulationStore>((set, get) => ({
           case 'tick':
             get()._setWorld(msg.data);
             get()._addPriceHistoryPoint(msg.data);
+            get()._addEconomyHistoryPoint(msg.data);
             break;
           case 'agent-decision':
             get()._addAgentDecision(msg.data);
@@ -195,6 +200,29 @@ export const useSimulation = create<SimulationStore>((set, get) => ({
 
     set((state) => ({
       priceHistory: [...state.priceHistory, point].slice(-MAX_HISTORY_POINTS),
+    }));
+  },
+
+  _addEconomyHistoryPoint: (world: WorldSnapshot) => {
+    // Track economy history
+    const ships = world.ships || [];
+    const islands = world.islands || [];
+    const totalMoneySupply = ships.reduce((sum: number, s) => sum + (s.cash || 0), 0);
+    const avgFishStock = islands.length > 0
+      ? islands.reduce((sum: number, i) => sum + (i.ecosystem?.fishStock / i.ecosystem?.fishCapacity || 0), 0) / islands.length
+      : 0;
+
+    const economyPoint: EconomyHistoryPoint = {
+      tick: world.tick,
+      gameDay: world.gameTime?.gameDay || 1,
+      totalTaxCollected: world.economyMetrics?.totalTaxCollected || 0,
+      totalMoneySupply,
+      avgFishStock,
+      tradeVolume: 0, // We don't track individual trades yet
+    };
+
+    set((state) => ({
+      economyHistory: [...state.economyHistory.slice(-99), economyPoint],
     }));
   },
 
