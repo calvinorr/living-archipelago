@@ -222,24 +222,32 @@ export function updateMarket(
 
 /**
  * Execute a trade transaction at an island
- * Returns updated inventories
+ * Returns updated inventories and tax collected
+ *
+ * Transaction tax is applied as a currency sink:
+ * - On buys: tax is deducted from buyer's cash (in addition to the purchase price)
+ * - On sells: tax is deducted from the sale revenue before crediting to seller
+ * - Tax money is destroyed, not transferred to anyone
  */
 export function executeTrade(
   islandInventory: Map<GoodId, number>,
   shipCargo: Map<GoodId, number>,
   shipCash: number,
   transactions: Array<{ goodId: GoodId; quantity: number }>, // positive = buy from island
-  prices: Map<GoodId, number>
+  prices: Map<GoodId, number>,
+  taxRate: number = 0 // Transaction tax rate (0.04 = 4%)
 ): {
   newIslandInventory: Map<GoodId, number>;
   newShipCargo: Map<GoodId, number>;
   newShipCash: number;
   totalCost: number;
+  taxCollected: number; // Total tax collected (currency destroyed)
 } {
   const newIslandInventory = new Map(islandInventory);
   const newShipCargo = new Map(shipCargo);
   let newShipCash = shipCash;
   let totalCost = 0;
+  let taxCollected = 0;
 
   for (const { goodId, quantity } of transactions) {
     const price = prices.get(goodId) ?? 10;
@@ -248,20 +256,25 @@ export function executeTrade(
       // Buying from island
       const available = newIslandInventory.get(goodId) ?? 0;
       const actualQty = Math.min(quantity, available);
-      const cost = actualQty * price;
+      const baseCost = actualQty * price;
+      const tax = baseCost * taxRate;
+      const totalWithTax = baseCost + tax;
 
-      if (cost <= newShipCash && actualQty > 0) {
+      if (totalWithTax <= newShipCash && actualQty > 0) {
         newIslandInventory.set(goodId, available - actualQty);
         newShipCargo.set(goodId, (newShipCargo.get(goodId) ?? 0) + actualQty);
-        newShipCash -= cost;
-        totalCost += cost;
+        newShipCash -= totalWithTax; // Deduct cost + tax
+        totalCost += baseCost;
+        taxCollected += tax; // Tax is destroyed (currency sink)
       }
     } else if (quantity < 0) {
       // Selling to island
       const sellingQty = Math.abs(quantity);
       const hasCargo = newShipCargo.get(goodId) ?? 0;
       const actualQty = Math.min(sellingQty, hasCargo);
-      const revenue = actualQty * price;
+      const baseRevenue = actualQty * price;
+      const tax = baseRevenue * taxRate;
+      const netRevenue = baseRevenue - tax;
 
       if (actualQty > 0) {
         newShipCargo.set(goodId, hasCargo - actualQty);
@@ -269,8 +282,9 @@ export function executeTrade(
           goodId,
           (newIslandInventory.get(goodId) ?? 0) + actualQty
         );
-        newShipCash += revenue;
-        totalCost -= revenue; // Negative cost = revenue
+        newShipCash += netRevenue; // Credit revenue minus tax
+        totalCost -= baseRevenue; // Negative cost = revenue (pre-tax for accounting)
+        taxCollected += tax; // Tax is destroyed (currency sink)
       }
     }
   }
@@ -280,6 +294,7 @@ export function executeTrade(
     newShipCargo,
     newShipCash,
     totalCost,
+    taxCollected,
   };
 }
 

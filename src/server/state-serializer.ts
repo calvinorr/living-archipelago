@@ -90,6 +90,11 @@ export interface EventSnapshot {
   remainingHours: number;
 }
 
+export interface EconomyMetricsSnapshot {
+  taxCollectedThisTick: number; // Tax collected in current tick
+  totalTaxCollected: number; // Cumulative tax collected (currency destroyed)
+}
+
 export interface WorldSnapshot {
   tick: number;
   gameTime: {
@@ -100,6 +105,7 @@ export interface WorldSnapshot {
   islands: IslandSnapshot[];
   ships: ShipSnapshot[];
   events: EventSnapshot[];
+  economyMetrics: EconomyMetricsSnapshot;
 }
 
 function serializeIsland(island: IslandState): IslandSnapshot {
@@ -187,6 +193,12 @@ function serializeEvent(event: WorldEvent, currentTick: number): EventSnapshot {
 }
 
 export function serializeWorldState(state: WorldState): WorldSnapshot {
+  // Provide default economy metrics for backwards compatibility
+  const economyMetrics = state.economyMetrics ?? {
+    taxCollectedThisTick: 0,
+    totalTaxCollected: 0,
+  };
+
   return {
     tick: state.tick,
     gameTime: {
@@ -199,5 +211,9 @@ export function serializeWorldState(state: WorldState): WorldSnapshot {
     events: state.events
       .filter((e) => e.startTick <= state.tick && e.endTick > state.tick)
       .map((e) => serializeEvent(e, state.tick)),
+    economyMetrics: {
+      taxCollectedThisTick: economyMetrics.taxCollectedThisTick,
+      totalTaxCollected: economyMetrics.totalTaxCollected,
+    },
   };
 }

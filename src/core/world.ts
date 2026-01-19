@@ -25,6 +25,7 @@ import type {
   BuildingsConfig,
   BuildingId,
   Building,
+  FishMigrationConfig,
 } from './types.js';
 import { createShipyard } from '../systems/shipyard.js';
 
@@ -44,6 +45,17 @@ export const SECTOR_TO_GOOD: Record<Sector, GoodId | null> = {
  * All labor sectors (Track 06)
  */
 export const SECTORS: Sector[] = ['fishing', 'forestry', 'farming', 'industry', 'services'];
+
+/**
+ * Default fish migration configuration
+ * Fish migrate from depleted ecosystems to healthier ones
+ */
+export const DEFAULT_FISH_MIGRATION_CONFIG: FishMigrationConfig = {
+  depletedThreshold: 0.4, // Below 40% capacity: fish start migrating away
+  healthyThreshold: 0.6, // Above 60% capacity: can receive migrating fish
+  migrationRate: 0.02, // 2% of fish stock can migrate per tick
+  minMigrationAmount: 5, // Minimum fish to trigger migration
+};
 
 /**
  * Default buildings configuration (Track 08)
@@ -217,6 +229,12 @@ export const DEFAULT_CONFIG: SimulationConfig = {
 
   // Buildings System (Track 08)
   buildingsConfig: DEFAULT_BUILDINGS_CONFIG,
+
+  // Fish Migration System
+  fishMigrationConfig: DEFAULT_FISH_MIGRATION_CONFIG,
+
+  // Transaction Tax (currency sink)
+  transactionTaxRate: 0.04, // 4% tax on all trades
 };
 
 /**
@@ -280,28 +298,36 @@ function createInitialInventory(
 ): Map<GoodId, number> {
   const inventory = new Map<GoodId, number>();
 
+  // Calculate ~7 days of food buffer for trade establishment
+  // Consumption: population * 0.06/hour * 24 hours ≈ 1.44 * population per day
   switch (archetype) {
     case 'fishing':
-      inventory.set('fish', 200);
-      inventory.set('grain', 100);
-      inventory.set('timber', 30);
-      inventory.set('tools', 20);
-      inventory.set('luxuries', 10);
+      // Population 500: needs ~720/day, 7 days = 5040 total food
+      // Fishing islands produce fish, need grain imports
+      inventory.set('fish', 3000); // Can produce locally
+      inventory.set('grain', 2500); // Needs import - large buffer
+      inventory.set('timber', 50);
+      inventory.set('tools', 40);
+      inventory.set('luxuries', 20);
       break;
     case 'agricultural':
-      inventory.set('fish', 50);
-      inventory.set('grain', 300);
-      inventory.set('timber', 50);
-      inventory.set('tools', 30);
-      inventory.set('luxuries', 15);
+      // Population 600: needs ~864/day, 7 days = 6048 total food
+      // Agricultural islands are self-sufficient but export-focused
+      inventory.set('fish', 1500);
+      inventory.set('grain', 5000); // Main producer
+      inventory.set('timber', 100);
+      inventory.set('tools', 60);
+      inventory.set('luxuries', 30);
       break;
     case 'forest':
-      // Increased starting food to allow time for trade routes to establish
-      inventory.set('fish', 100);
-      inventory.set('grain', 150);
-      inventory.set('timber', 250);
-      inventory.set('tools', 25);
-      inventory.set('luxuries', 10);
+      // Population 450: needs ~648/day
+      // Forest islands start with MINIMAL food - high prices signal urgent need for imports
+      // Trade routes should immediately prioritize food delivery here
+      inventory.set('fish', 50);   // Very low - creates high price signal
+      inventory.set('grain', 50);  // Very low - creates high price signal
+      inventory.set('timber', 800);
+      inventory.set('tools', 50);
+      inventory.set('luxuries', 20);
       break;
   }
 
@@ -376,10 +402,12 @@ function createProductionParams(
       baseRate.set('luxuries', 0.7);
       break;
     case 'forest':
-      // Slight increase in food production to prevent starvation before trade establishes
-      baseRate.set('fish', 1.5);  // Was 0.7 - small fishing village
-      baseRate.set('grain', 3);   // Was 2 - some subsistence farming
-      baseRate.set('timber', 13); // Was 20
+      // Forest islands need substantial local food production
+      // Pop 450 * 0.06/hour = 27 food/hour consumption
+      // Need ~20 food/hour local + trade to survive
+      baseRate.set('fish', 8);    // Significant coastal fishing
+      baseRate.set('grain', 12);  // Substantial subsistence farming
+      baseRate.set('timber', 10); // Still main export
       baseRate.set('tools', 2);
       baseRate.set('luxuries', 0.3);
       break;
@@ -527,32 +555,82 @@ export function createDefaultCrew(capacity: number, baseWageRate: number = 0.5):
 export function createMVPShips(): Map<ShipId, ShipState> {
   const ships = new Map<ShipId, ShipState>();
 
+  // Ship 1: Greenbarrow to Shoalhold grain route
   ships.set('sloop-1', {
     id: 'sloop-1',
     name: 'Sea Trader',
     ownerId: 'trader-alpha',
     capacity: 100,
-    speed: 10, // distance units per hour
-    cash: 500,
+    speed: 10,
+    cash: 2000,
     cargo: new Map(),
-    location: { kind: 'at_island', islandId: 'shoalhold' },
+    location: { kind: 'at_island', islandId: 'greenbarrow' }, // Start at grain source
     cumulativeTransportCosts: 0,
     crew: createDefaultCrew(100),
-    condition: 1.0, // New ships start at full condition
+    condition: 1.0,
     totalDistanceTraveled: 0,
   });
 
+  // Ship 2: Greenbarrow to Timberwake grain route
   ships.set('sloop-2', {
     id: 'sloop-2',
     name: 'Wave Runner',
     ownerId: 'trader-alpha',
     capacity: 80,
     speed: 12,
-    cash: 400,
+    cash: 1600,
     cargo: new Map(),
-    location: { kind: 'at_island', islandId: 'greenbarrow' },
+    location: { kind: 'at_island', islandId: 'greenbarrow' }, // Start at grain source
     cumulativeTransportCosts: 0,
     crew: createDefaultCrew(80),
+    condition: 1.0,
+    totalDistanceTraveled: 0,
+  });
+
+  // Ship 3: Shoalhold to Timberwake fish route
+  ships.set('sloop-3', {
+    id: 'sloop-3',
+    name: 'Forest Spirit',
+    ownerId: 'trader-alpha',
+    capacity: 90,
+    speed: 11,
+    cash: 1800,
+    cargo: new Map(),
+    location: { kind: 'at_island', islandId: 'shoalhold' }, // Start at fish source
+    cumulativeTransportCosts: 0,
+    crew: createDefaultCrew(90),
+    condition: 1.0,
+    totalDistanceTraveled: 0,
+  });
+
+  // Ship 4: General trade / fish to Greenbarrow
+  ships.set('clipper-1', {
+    id: 'clipper-1',
+    name: 'Swift Current',
+    ownerId: 'trader-alpha',
+    capacity: 60,
+    speed: 15,
+    cash: 1200,
+    cargo: new Map(),
+    location: { kind: 'at_island', islandId: 'shoalhold' }, // Start at fish source
+    cumulativeTransportCosts: 0,
+    crew: createDefaultCrew(60),
+    condition: 1.0,
+    totalDistanceTraveled: 0,
+  });
+
+  // Ship 5: Dedicated Timberwake food supplier
+  ships.set('sloop-4', {
+    id: 'sloop-4',
+    name: 'Timber Lifeline',
+    ownerId: 'trader-alpha',
+    capacity: 100,
+    speed: 10,
+    cash: 2000,
+    cargo: new Map(),
+    location: { kind: 'at_island', islandId: 'greenbarrow' }, // Start at grain source for Timberwake
+    cumulativeTransportCosts: 0,
+    crew: createDefaultCrew(100),
     condition: 1.0,
     totalDistanceTraveled: 0,
   });
@@ -633,6 +711,10 @@ export function initializeWorld(seed: number): WorldState {
     events: [],
     agents,
     goods,
+    economyMetrics: {
+      taxCollectedThisTick: 0,
+      totalTaxCollected: 0,
+    },
   };
 }
 
@@ -667,6 +749,9 @@ export function cloneWorldState(state: WorldState): WorldState {
       ])
     ),
     goods: new Map(state.goods),
+    economyMetrics: state.economyMetrics
+      ? { ...state.economyMetrics }
+      : { taxCollectedThisTick: 0, totalTaxCollected: 0 },
   };
 }
 

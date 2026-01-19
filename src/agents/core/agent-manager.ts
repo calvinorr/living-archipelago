@@ -33,11 +33,14 @@ export interface AgentManagerConfig {
   debug: boolean;
   /** Trigger configuration */
   triggerConfig: Partial<TriggerConfig>;
+  /** Transaction tax rate (0.04 = 4%, currency sink) */
+  transactionTaxRate: number;
 }
 
 const DEFAULT_MANAGER_CONFIG: AgentManagerConfig = {
   debug: false,
   triggerConfig: {},
+  transactionTaxRate: 0.04, // 4% default transaction tax
 };
 
 /**
@@ -256,12 +259,13 @@ export class AgentManager {
 
     if (!ship || !island) return;
 
-    const { newIslandInventory, newShipCargo, newShipCash } = executeTrade(
+    const { newIslandInventory, newShipCargo, newShipCash, taxCollected } = executeTrade(
       island.inventory,
       ship.cargo,
       ship.cash,
       action.transactions,
-      island.market.prices
+      island.market.prices,
+      this.config.transactionTaxRate
     );
 
     // Update ship
@@ -271,6 +275,12 @@ export class AgentManager {
     // Update island
     const updatedIsland = { ...island, inventory: newIslandInventory };
     world.islands.set(action.islandId, updatedIsland);
+
+    // Update economy metrics (tax is a currency sink - money destroyed)
+    if (taxCollected > 0 && world.economyMetrics) {
+      world.economyMetrics.taxCollectedThisTick += taxCollected;
+      world.economyMetrics.totalTaxCollected += taxCollected;
+    }
   }
 
   private applyNavigateAction(
@@ -287,7 +297,7 @@ export class AgentManager {
   }
 
   private cloneWorld(world: WorldState): WorldState {
-    // Shallow clone - actions only modify ships and islands
+    // Shallow clone - actions only modify ships, islands, and economy metrics
     return {
       ...world,
       islands: new Map(
@@ -323,6 +333,10 @@ export class AgentManager {
           },
         ])
       ),
+      // Clone economy metrics for immutability
+      economyMetrics: world.economyMetrics
+        ? { ...world.economyMetrics }
+        : { taxCollectedThisTick: 0, totalTaxCollected: 0 },
     };
   }
 

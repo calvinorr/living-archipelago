@@ -30,7 +30,7 @@ export interface TraderAgentConfig {
   /** Executor configuration */
   executorConfig: Partial<ExecutorConfig>;
   /** Rate limiter preset */
-  rateLimiterPreset: 'conservative' | 'balanced' | 'aggressive';
+  rateLimiterPreset: 'conservative' | 'balanced' | 'aggressive' | 'unlimited';
   /** Enable debug logging */
   debug: boolean;
 }
@@ -402,53 +402,49 @@ export function createMockTraderAgent(
   config?: Partial<TraderAgentConfig>
 ): TraderAgent {
   // Define realistic trade routes based on island specializations
-  // Routes form multiple cycles to ensure goods flow to all islands
+  // CRITICAL: Timberwake is the most isolated - prioritize food delivery there FIRST
+  // Order matters: executor picks first matching route
   const mockTradeRoutes = [
-    // Primary food distribution - CRITICAL for population health
+    // HIGHEST PRIORITY: Food TO Timberwake (most vulnerable island)
     {
-      // Fish from fishing island to farming island
-      from: 'shoalhold',
-      to: 'greenbarrow',
-      goods: ['fish'],
-      priority: 1,
-    },
-    {
-      // Fish AND Grain to timber island (needs food!)
-      from: 'shoalhold',
-      to: 'timberwake',
-      goods: ['fish'],
-      priority: 1, // High priority - Timberwake needs food
-    },
-    {
-      // Grain from farming island to timber island
       from: 'greenbarrow',
       to: 'timberwake',
       goods: ['grain'],
-      priority: 1, // High priority - Timberwake needs food
+      priority: 1,
     },
     {
-      // Grain to fishing island
+      from: 'shoalhold',
+      to: 'timberwake',
+      goods: ['fish'],
+      priority: 1,
+    },
+    // PRIORITY 2: Food exchange between food producers
+    {
+      from: 'shoalhold',
+      to: 'greenbarrow',
+      goods: ['fish'],
+      priority: 2,
+    },
+    {
       from: 'greenbarrow',
       to: 'shoalhold',
       goods: ['grain'],
       priority: 2,
     },
-    // Material trade
+    // PRIORITY 3: Material trade (return trips)
     {
-      // Timber from forest island to farming island
       from: 'timberwake',
       to: 'greenbarrow',
       goods: ['timber'],
       priority: 3,
     },
     {
-      // Timber from forest island to fishing island
       from: 'timberwake',
       to: 'shoalhold',
       goods: ['timber'],
       priority: 3,
     },
-    // Tools distribution (produced at industrial centers)
+    // PRIORITY 4: Tools distribution
     {
       from: 'greenbarrow',
       to: 'timberwake',
@@ -476,5 +472,10 @@ export function createMockTraderAgent(
 
   const mockClient = createMockLLMClient(mockResponses ?? defaultResponse);
 
-  return new TraderAgent(id, name, mockClient, initialAssets, { debug: true, ...config });
+  // Use unlimited rate limiter for mock testing (no API costs)
+  return new TraderAgent(id, name, mockClient, initialAssets, {
+    debug: true,
+    rateLimiterPreset: 'unlimited',
+    ...config
+  });
 }

@@ -276,6 +276,14 @@ export interface GameTime {
   gameDay: number;
 }
 
+/**
+ * Economy metrics for monitoring (currency sinks, etc.)
+ */
+export interface EconomyMetrics {
+  taxCollectedThisTick: number; // Tax collected in current tick
+  totalTaxCollected: number; // Cumulative tax collected (currency destroyed)
+}
+
 export interface WorldState {
   tick: number;
   gameTime: GameTime;
@@ -286,6 +294,7 @@ export interface WorldState {
   events: WorldEvent[];
   agents: Map<AgentId, AgentState>;
   goods: Map<GoodId, GoodDefinition>;
+  economyMetrics: EconomyMetrics; // Economic monitoring data
 }
 
 // ============================================================================
@@ -359,6 +368,23 @@ export interface SimulationConfig {
 
   // Buildings System (Track 08)
   buildingsConfig: BuildingsConfig;
+
+  // Fish Migration System
+  fishMigrationConfig: FishMigrationConfig;
+
+  // Transaction Tax (currency sink)
+  transactionTaxRate: number; // Tax rate on trades (0.04 = 4%)
+}
+
+/**
+ * Fish migration configuration
+ * Fish migrate from depleted ecosystems to healthier ones
+ */
+export interface FishMigrationConfig {
+  depletedThreshold: number; // Fish stock ratio below which fish migrate away (0.4)
+  healthyThreshold: number; // Fish stock ratio above which fish can receive migrants (0.6)
+  migrationRate: number; // Max fraction of fish stock that can migrate per tick (0.02 = 2%)
+  minMigrationAmount: number; // Minimum fish amount to trigger migration (5)
 }
 
 /**

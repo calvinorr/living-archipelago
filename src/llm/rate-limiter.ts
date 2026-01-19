@@ -213,9 +213,15 @@ export class RateLimiter {
  * Create a rate limiter with preset configurations
  */
 export function createRateLimiter(
-  preset: 'conservative' | 'balanced' | 'aggressive' = 'balanced'
+  preset: 'conservative' | 'balanced' | 'aggressive' | 'unlimited' = 'balanced'
 ): RateLimiter {
   const presets: Record<string, Partial<RateLimiterConfig>> = {
+    // Unlimited preset for mock/testing - no rate limiting
+    unlimited: {
+      maxCallsPerSession: 100000,
+      minIntervalMs: 0,
+      warningThreshold: 0,
+    },
     conservative: {
       maxCallsPerSession: 60,
       minIntervalMs: 3000,

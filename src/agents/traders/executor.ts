@@ -14,6 +14,22 @@ import { createTradeAction, createNavigateAction, createWaitAction } from '../in
 import type { Strategy, TraderMemory } from './memory.js';
 
 /**
+ * Bulkiness values for goods (space per unit)
+ * Must match world.ts definitions
+ */
+const GOOD_BULKINESS: Record<string, number> = {
+  fish: 1,
+  grain: 1,
+  timber: 2,
+  tools: 0.5,
+  luxuries: 0.3,
+};
+
+function getBulkiness(goodId: GoodId): number {
+  return GOOD_BULKINESS[goodId] ?? 1;
+}
+
+/**
  * Executor configuration
  */
 export interface ExecutorConfig {
@@ -237,15 +253,22 @@ export class Executor {
     if (ship.remainingCapacity <= 0) return null;
 
     // Check if we have cash
-    const availableCash = ship.cash * (1 - this.config.cashReserve);
-    if (availableCash <= 0) return null;
+    const initialCash = ship.cash * (1 - this.config.cashReserve);
+    if (initialCash <= 0) return null;
 
     const transactions: Transaction[] = [];
 
+    // Track remaining resources across the loop
+    let remainingCash = initialCash;
+    let remainingSpace = ship.remainingCapacity;
+
     // Find goods to buy based on strategy
-    const goodsToBuy = this.findGoodsToBuy(island, strategy, observation);
+    const goodsToBuy = this.findGoodsToBuy(island, strategy, observation, ship);
 
     for (const { goodId, quantity } of goodsToBuy) {
+      // Stop if we're out of resources
+      if (remainingCash <= 0 || remainingSpace <= 0) break;
+
       const price = island.prices.get(goodId) ?? 0;
       if (price <= 0) continue;
 
@@ -253,11 +276,14 @@ export class Executor {
       const available = island.inventory?.get(goodId) ?? 0;
       if (available <= 0) continue;
 
-      // Calculate how much we can buy
-      const maxBySpace = Math.floor(ship.remainingCapacity); // Assume bulkiness = 1
-      const maxByCash = Math.floor(availableCash / price);
+      // Get bulkiness for this good
+      const bulkiness = getBulkiness(goodId);
+
+      // Calculate how much we can buy with REMAINING resources
+      const maxBySpace = Math.floor(remainingSpace / bulkiness); // Account for bulkiness
+      const maxByCash = Math.floor(remainingCash / price);
       const maxByInventory = available;
-      const maxByCapacity = Math.floor(ship.capacity * this.config.maxCargoFill);
+      const maxByCapacity = Math.floor((ship.capacity * this.config.maxCargoFill) / bulkiness);
 
       const buyQuantity = Math.min(quantity, maxBySpace, maxByCash, maxByInventory, maxByCapacity);
 
@@ -266,6 +292,9 @@ export class Executor {
           goodId,
           quantity: buyQuantity,
         });
+        // Update remaining resources (account for bulkiness)
+        remainingCash -= buyQuantity * price;
+        remainingSpace -= buyQuantity * bulkiness;
       }
     }
 
@@ -280,9 +309,14 @@ export class Executor {
   private findGoodsToBuy(
     island: ObservableIsland,
     strategy: Strategy | null,
-    observation: ObservableState
+    observation: ObservableState,
+    ship: ObservableShip
   ): Array<{ goodId: GoodId; quantity: number }> {
     const result: Array<{ goodId: GoodId; quantity: number; score: number }> = [];
+
+    // Calculate max capacity based on ship constraints
+    const availableCash = ship.cash * (1 - this.config.cashReserve);
+    const maxSpace = ship.remainingCapacity * this.config.maxCargoFill;
 
     // Check strategy routes
     if (strategy) {
@@ -297,11 +331,20 @@ export class Executor {
           if (buyPrice > 0 && sellPrice > buyPrice) {
             const margin = (sellPrice - buyPrice) / buyPrice;
             if (margin >= this.config.minProfitMargin) {
-              result.push({
-                goodId,
-                quantity: 100, // Base quantity, limited by constraints
-                score: margin * route.priority,
-              });
+              // Calculate quantity based on actual constraints (accounting for bulkiness)
+              const bulkiness = getBulkiness(goodId);
+              const maxBySpace = Math.floor(maxSpace / bulkiness);
+              const maxByCash = Math.floor(availableCash / buyPrice);
+              const available = island.inventory?.get(goodId) ?? 0;
+              const quantity = Math.min(maxBySpace, maxByCash, available, 100); // Cap at 100 per good
+
+              if (quantity > 0) {
+                result.push({
+                  goodId,
+                  quantity,
+                  score: margin * route.priority,
+                });
+              }
             }
           }
         }
@@ -312,11 +355,20 @@ export class Executor {
     if (result.length === 0 && observation.metrics.bestArbitrage) {
       const arb = observation.metrics.bestArbitrage;
       if (arb.fromIsland === island.id) {
-        result.push({
-          goodId: arb.goodId,
-          quantity: 50,
-          score: arb.margin,
-        });
+        const buyPrice = island.prices.get(arb.goodId) ?? 1;
+        const bulkiness = getBulkiness(arb.goodId);
+        const maxBySpace = Math.floor(maxSpace / bulkiness);
+        const maxByCash = Math.floor(availableCash / buyPrice);
+        const available = island.inventory?.get(arb.goodId) ?? 0;
+        const quantity = Math.min(maxBySpace, maxByCash, available, 50);
+
+        if (quantity > 0) {
+          result.push({
+            goodId: arb.goodId,
+            quantity,
+            score: arb.margin,
+          });
+        }
       }
     }
 

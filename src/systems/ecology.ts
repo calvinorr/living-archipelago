@@ -12,6 +12,7 @@ import type {
   WorldEvent,
   SimulationConfig,
   EcosystemHealthState,
+  IslandId,
 } from '../core/types.js';
 
 /**
@@ -295,4 +296,139 @@ export function getEcosystemIndicators(
     forestHealth: ecosystem.forestBiomass / params.forestCapacity,
     soilHealth: ecosystem.soilFertility,
   };
+}
+
+/**
+ * Fish migration result for logging/debugging
+ */
+export interface FishMigrationResult {
+  migrations: Array<{
+    fromIslandId: IslandId;
+    toIslandId: IslandId;
+    amount: number;
+  }>;
+  totalMigrated: number;
+}
+
+/**
+ * Apply fish migration between islands
+ *
+ * Fish migrate AWAY from depleted ecosystems (fishStock/capacity < depletedThreshold)
+ * Fish migrate TO healthier ecosystems (fishStock/capacity > healthyThreshold)
+ *
+ * Migration rate is proportional to the ecosystem health difference.
+ * This helps prevent total ecosystem collapse by allowing fish populations
+ * to naturally redistribute.
+ *
+ * @param islands - Map of all islands
+ * @param config - Simulation config with migration parameters
+ * @returns Updated islands map and migration metrics
+ */
+export function applyFishMigration(
+  islands: Map<IslandId, IslandState>,
+  config: SimulationConfig
+): { newIslands: Map<IslandId, IslandState>; result: FishMigrationResult } {
+  const migrationConfig = config.fishMigrationConfig;
+  const result: FishMigrationResult = {
+    migrations: [],
+    totalMigrated: 0,
+  };
+
+  // Create a working copy of islands
+  const newIslands = new Map<IslandId, IslandState>();
+  for (const [id, island] of islands) {
+    newIslands.set(id, {
+      ...island,
+      ecosystem: { ...island.ecosystem },
+    });
+  }
+
+  const islandArray = Array.from(newIslands.values());
+
+  // Identify depleted islands (sources) and healthy islands (destinations)
+  const depletedIslands = islandArray.filter((island) => {
+    const fishRatio = island.ecosystem.fishStock / island.ecosystemParams.fishCapacity;
+    return fishRatio < migrationConfig.depletedThreshold && island.ecosystem.fishStock > 0;
+  });
+
+  const healthyIslands = islandArray.filter((island) => {
+    const fishRatio = island.ecosystem.fishStock / island.ecosystemParams.fishCapacity;
+    // Healthy islands must have capacity to receive fish
+    return (
+      fishRatio > migrationConfig.healthyThreshold &&
+      island.ecosystem.fishStock < island.ecosystemParams.fishCapacity
+    );
+  });
+
+  // If no healthy destinations, fish have nowhere to go
+  if (healthyIslands.length === 0) {
+    return { newIslands, result };
+  }
+
+  // Calculate total "attractiveness" of healthy islands (based on available capacity and health)
+  const healthyWeights = healthyIslands.map((island) => {
+    const fishRatio = island.ecosystem.fishStock / island.ecosystemParams.fishCapacity;
+    const availableCapacity = island.ecosystemParams.fishCapacity - island.ecosystem.fishStock;
+    // Weight by both health and available space
+    return {
+      island,
+      weight: fishRatio * availableCapacity,
+    };
+  });
+
+  const totalWeight = healthyWeights.reduce((sum, hw) => sum + hw.weight, 0);
+
+  // Process each depleted island
+  for (const sourceIsland of depletedIslands) {
+    const sourceId = sourceIsland.id;
+    const sourceFishRatio =
+      sourceIsland.ecosystem.fishStock / sourceIsland.ecosystemParams.fishCapacity;
+
+    // Calculate migration amount based on depletion severity
+    // More depleted = faster migration (fish are more "desperate" to leave)
+    const depletionSeverity = migrationConfig.depletedThreshold - sourceFishRatio;
+    const migrationFraction = migrationConfig.migrationRate * (depletionSeverity / migrationConfig.depletedThreshold);
+    const migrationAmount = sourceIsland.ecosystem.fishStock * migrationFraction;
+
+    // Skip if migration amount is too small
+    if (migrationAmount < migrationConfig.minMigrationAmount) {
+      continue;
+    }
+
+    // Distribute migration to healthy islands proportionally
+    let remainingMigration = migrationAmount;
+
+    for (const { island: destIsland, weight } of healthyWeights) {
+      if (remainingMigration <= 0) break;
+
+      const destId = destIsland.id;
+      const proportion = weight / totalWeight;
+      const toMigrate = Math.min(
+        migrationAmount * proportion,
+        remainingMigration,
+        // Don't exceed destination capacity
+        destIsland.ecosystemParams.fishCapacity - destIsland.ecosystem.fishStock
+      );
+
+      if (toMigrate > 0) {
+        // Get mutable references from our working map
+        const sourceState = newIslands.get(sourceId)!;
+        const destState = newIslands.get(destId)!;
+
+        // Apply migration
+        sourceState.ecosystem.fishStock -= toMigrate;
+        destState.ecosystem.fishStock += toMigrate;
+        remainingMigration -= toMigrate;
+
+        result.migrations.push({
+          fromIslandId: sourceId,
+          toIslandId: destId,
+          amount: toMigrate,
+        });
+        result.totalMigrated += toMigrate;
+      }
+    }
+  }
+
+  return { newIslands, result };
 }

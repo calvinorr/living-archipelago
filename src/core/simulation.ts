@@ -15,7 +15,7 @@ import type {
 import { SeededRNG, hashState } from './rng.js';
 import { cloneWorldState, tickToGameTime, DEFAULT_CONFIG, initializeWorld } from './world.js';
 
-import { updateEcology, type HarvestData } from '../systems/ecology.js';
+import { updateEcology, applyFishMigration, type HarvestData, type FishMigrationResult } from '../systems/ecology.js';
 import { updateProduction, type ProductionResult } from '../systems/production.js';
 import { updateConsumption, type ConsumptionResult } from '../systems/consumption.js';
 import { updatePopulation } from '../systems/population.js';
@@ -25,6 +25,7 @@ import { generateEvents, updateEvents } from '../systems/events.js';
 import { updateCrew, type CrewUpdateResult } from '../systems/crew.js';
 import { updateAllShipyards } from '../systems/shipyard.js';
 import { updateBuildingMaintenance } from '../systems/buildings.js';
+import { applyStorageSpoilage } from '../systems/storage.js';
 
 /**
  * Tick metrics for logging/debugging
@@ -40,6 +41,7 @@ export interface TickMetrics {
   expiredEvents: string[];
   crewUpdates: Map<string, CrewUpdateResult>;
   shipyardCompletions: Array<{ shipyardId: ShipyardId; shipId: ShipId; shipName: string }>;
+  fishMigration: FishMigrationResult;
 }
 
 /**
@@ -109,12 +111,18 @@ export class Simulation {
       expiredEvents: [],
       crewUpdates: new Map(),
       shipyardCompletions: [],
+      fishMigration: { migrations: [], totalMigrated: 0 },
     };
 
     // Clone state for immutable update
     const next = cloneWorldState(this.state);
     next.tick += 1;
     next.gameTime = tickToGameTime(next.tick);
+
+    // Reset per-tick economy metrics
+    if (next.economyMetrics) {
+      next.economyMetrics.taxCollectedThisTick = 0;
+    }
 
     // =========================================================================
     // 1. Generate and apply events
@@ -158,11 +166,19 @@ export class Simulation {
       };
       const newEcosystem = updateEcology(island, harvestData, this.config, next.events, dt);
 
+      // 3.5 Storage spoilage (after production, before consumption)
+      const islandAfterProduction: IslandState = {
+        ...island,
+        ecosystem: newEcosystem,
+        inventory: productionResult.newInventory,
+      };
+      const storageSpoilageResult = applyStorageSpoilage(islandAfterProduction, dt);
+
       // 4. Consumption
       const islandForConsumption: IslandState = {
         ...island,
         ecosystem: newEcosystem,
-        inventory: productionResult.newInventory,
+        inventory: storageSpoilageResult.newInventory,
       };
       const consumptionResult = updateConsumption(
         islandForConsumption,
@@ -224,6 +240,13 @@ export class Simulation {
         market: newMarket,
       });
     }
+
+    // =========================================================================
+    // 6.5. Fish migration - fish move from depleted to healthy ecosystems
+    // =========================================================================
+    const fishMigrationResult = applyFishMigration(next.islands, this.config);
+    next.islands = fishMigrationResult.newIslands;
+    metrics.fishMigration = fishMigrationResult.result;
 
     // =========================================================================
     // 7. Building maintenance - condition decay and upkeep
