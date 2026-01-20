@@ -12,7 +12,10 @@ import type {
   WorldState,
   WorldEvent,
   Vector2,
+  ShipState,
+  PriceKnowledge,
 } from '../../core/types.js';
+import { DEFAULT_CREDIT_CONFIG, DEFAULT_OPERATING_COSTS_CONFIG, DEFAULT_ISLAND_ECONOMY_CONFIG } from '../../core/world.js';
 
 /**
  * Visibility configuration per agent type
@@ -40,12 +43,24 @@ export interface ObservableIsland {
   name: string;
   position: Vector2;
 
-  /** Market prices (always visible for traders) */
+  /** Market prices (may be stale for remote islands - see priceAge) */
   prices: Map<GoodId, number>;
   /** Price history (last N ticks) */
   priceHistory: Map<GoodId, number[]>;
   /** Price momentum (direction of change) */
   priceMomentum: Map<GoodId, number>;
+
+  /**
+   * Age of price information in ticks (Price Discovery Lag)
+   * - 0 means current (ship is at this island)
+   * - -1 means no knowledge (never visited)
+   * - >0 means stale (ticks since last visit)
+   */
+  priceAge: number;
+  /** True if price data is potentially unreliable (>24 ticks old or unknown) */
+  pricesStale: boolean;
+  /** True if this is real-time data (ship is docked here) */
+  pricesRealTime: boolean;
 
   /** Inventory (visibility depends on agent type/location) */
   inventory?: Map<GoodId, number>;
@@ -63,6 +78,48 @@ export interface ObservableIsland {
     health: number;
     dominantSector: string;
   };
+
+  // =========================================================================
+  // Economic Model V2: Island Treasury & Purchasing Power
+  // =========================================================================
+
+  /**
+   * Island treasury (purchasing power for imports)
+   * Only visible when at the island (real-time data)
+   */
+  treasury?: number;
+
+  /**
+   * Maximum the island can spend on imports per tick
+   * Useful for planning large sell orders
+   */
+  importBudget?: number;
+
+  // =========================================================================
+  // Economic Model V2: Market Depth
+  // =========================================================================
+
+  /**
+   * Available buy depth per good (how much can be bought before major price impact)
+   * Only visible when at the island (real-time data)
+   */
+  buyDepth?: Map<GoodId, number>;
+
+  /**
+   * Available sell depth per good (how much can be sold before major price impact)
+   * Only visible when at the island (real-time data)
+   */
+  sellDepth?: Map<GoodId, number>;
+
+  // =========================================================================
+  // Economic Model V2: Supply Shocks
+  // =========================================================================
+
+  /**
+   * Active production shocks on this island
+   * Useful for identifying boom/bust trading opportunities
+   */
+  productionShocks?: Map<GoodId, { type: 'boom' | 'bust'; ticksRemaining: number }>;
 }
 
 /**
@@ -88,6 +145,64 @@ export interface ObservableShip {
     etaHours?: number;
     progress?: number;
   };
+
+  // =========================================================================
+  // Economic Model V2: Operating Costs
+  // =========================================================================
+
+  /**
+   * Estimated daily operating costs (crew wages + maintenance + port fees if docked)
+   * Useful for calculating minimum profit requirements
+   */
+  dailyOperatingCost: number;
+
+  /**
+   * Current crew count and morale
+   */
+  crew: {
+    count: number;
+    capacity: number;
+    morale: number;
+  };
+
+  /**
+   * Ship condition (0-1, affects speed and risk of sinking)
+   */
+  condition: number;
+
+  // =========================================================================
+  // Economic Model V2: Credit/Debt System
+  // =========================================================================
+
+  /**
+   * Current debt owed
+   */
+  debt: number;
+
+  /**
+   * Maximum credit line available
+   */
+  creditLimit: number;
+
+  /**
+   * Available credit (creditLimit - debt, capped if debt ratio too high)
+   */
+  availableCredit: number;
+
+  /**
+   * Debt-to-value ratio (0-1, >0.8 means credit cut off)
+   */
+  debtRatio: number;
+
+  /**
+   * Interest rate per tick on outstanding debt
+   */
+  interestRate: number;
+
+  /**
+   * Estimated daily interest cost if debt remains unchanged
+   */
+  dailyInterestCost: number;
 }
 
 /**
@@ -235,16 +350,29 @@ export class ObservableBuilder {
     const config = this.getVisibilityConfig(agentType);
     const agent = world.agents.get(agentId);
 
-    // Get agent's ship locations for "at_location" visibility
+    // Get agent's ships and their locations for "at_location" visibility and price knowledge
     const agentShipLocations = new Set<IslandId>();
+    const agentShips: ShipState[] = [];
     for (const ship of world.ships.values()) {
-      if (ship.ownerId === agentId && ship.location.kind === 'at_island') {
-        agentShipLocations.add(ship.location.islandId);
+      if (ship.ownerId === agentId) {
+        agentShips.push(ship);
+        if (ship.location.kind === 'at_island') {
+          agentShipLocations.add(ship.location.islandId);
+        }
       }
     }
 
-    // Build islands
-    const islands = this.buildIslands(world, config, agentShipLocations);
+    // Aggregate price knowledge from all agent's ships (use most recent for each island)
+    const aggregatedPriceKnowledge = this.aggregatePriceKnowledge(agentShips);
+
+    // Build islands with price discovery lag
+    const islands = this.buildIslands(
+      world,
+      config,
+      agentShipLocations,
+      aggregatedPriceKnowledge,
+      world.tick
+    );
 
     // Build ships
     const ships = this.buildShips(world, agentId, config);
@@ -275,21 +403,82 @@ export class ObservableBuilder {
     };
   }
 
+  /**
+   * Aggregate price knowledge from multiple ships
+   * Uses the most recent observation for each island
+   */
+  private aggregatePriceKnowledge(
+    ships: ShipState[]
+  ): Map<IslandId, PriceKnowledge> {
+    const aggregated = new Map<IslandId, PriceKnowledge>();
+
+    for (const ship of ships) {
+      if (!ship.lastKnownPrices) continue;
+
+      for (const [islandId, knowledge] of ship.lastKnownPrices) {
+        const existing = aggregated.get(islandId);
+        // Use the most recent knowledge
+        if (!existing || knowledge.tick > existing.tick) {
+          aggregated.set(islandId, knowledge);
+        }
+      }
+    }
+
+    return aggregated;
+  }
+
+  /** Threshold for considering price data stale (24 ticks = 1 game day) */
+  private static readonly STALE_PRICE_THRESHOLD = 24;
+
   private buildIslands(
     world: WorldState,
     config: VisibilityConfig,
-    agentLocations: Set<IslandId>
+    agentLocations: Set<IslandId>,
+    priceKnowledge: Map<IslandId, PriceKnowledge>,
+    currentTick: number
   ): Map<IslandId, ObservableIsland> {
     const result = new Map<IslandId, ObservableIsland>();
 
     for (const [islandId, island] of world.islands) {
+      // Determine price visibility based on Price Discovery Lag
+      const isAtIsland = agentLocations.has(islandId);
+      const knowledge = priceKnowledge.get(islandId);
+
+      let prices: Map<GoodId, number>;
+      let priceAge: number;
+      let pricesStale: boolean;
+      let pricesRealTime: boolean;
+
+      if (isAtIsland) {
+        // Ship is docked here - see real-time prices
+        prices = new Map(island.market.prices);
+        priceAge = 0;
+        pricesStale = false;
+        pricesRealTime = true;
+      } else if (knowledge) {
+        // Use last known prices from previous visit
+        prices = new Map(knowledge.prices);
+        priceAge = currentTick - knowledge.tick;
+        pricesStale = priceAge > ObservableBuilder.STALE_PRICE_THRESHOLD;
+        pricesRealTime = false;
+      } else {
+        // No knowledge - return empty prices (never visited)
+        prices = new Map();
+        priceAge = -1;
+        pricesStale = true;
+        pricesRealTime = false;
+      }
+
       const observable: ObservableIsland = {
         id: islandId,
         name: island.name,
         position: { ...island.position },
-        prices: new Map(island.market.prices),
+        prices,
         priceHistory: this.getPriceHistory(islandId),
         priceMomentum: new Map(island.market.momentum),
+        priceAge,
+        pricesStale,
+        pricesRealTime,
       };
 
       // Add inventory based on visibility
@@ -328,6 +517,41 @@ export class ObservableBuilder {
         };
       }
 
+      // =========================================================================
+      // Economic Model V2: Island Treasury & Market Depth
+      // Only visible when ship is at the island (real-time data)
+      // =========================================================================
+      if (isAtIsland) {
+        // Island treasury and import budget
+        observable.treasury = island.treasury;
+        const importBudget = island.treasury *
+          DEFAULT_ISLAND_ECONOMY_CONFIG.importBudgetRatio *
+          (1 - DEFAULT_ISLAND_ECONOMY_CONFIG.minTreasuryRatio);
+        observable.importBudget = importBudget;
+
+        // Market depth (for slippage estimation)
+        observable.buyDepth = new Map(island.market.buyDepth);
+        observable.sellDepth = new Map(island.market.sellDepth);
+      }
+
+      // =========================================================================
+      // Economic Model V2: Production Shocks (visible from price knowledge)
+      // =========================================================================
+      if (island.productionShocks && island.productionShocks.size > 0) {
+        const shocks = new Map<GoodId, { type: 'boom' | 'bust'; ticksRemaining: number }>();
+        for (const [goodId, shock] of island.productionShocks) {
+          if (shock.expiresAtTick > currentTick) {
+            shocks.set(goodId, {
+              type: shock.type,
+              ticksRemaining: shock.expiresAtTick - currentTick,
+            });
+          }
+        }
+        if (shocks.size > 0) {
+          observable.productionShocks = shocks;
+        }
+      }
+
       result.set(islandId, observable);
     }
 
@@ -355,6 +579,27 @@ export class ObservableBuilder {
         cargoVolume += qty * (good?.bulkiness ?? 1);
       }
 
+      // =========================================================================
+      // Economic Model V2: Calculate operating costs
+      // =========================================================================
+      const crewWages = ship.crew.count * ship.crew.wageRate *
+        DEFAULT_OPERATING_COSTS_CONFIG.crewWageMultiplier * 24; // Daily
+      const maintenance = ship.capacity * DEFAULT_OPERATING_COSTS_CONFIG.maintenanceRate * 24;
+      const portFees = ship.location.kind === 'at_island'
+        ? DEFAULT_OPERATING_COSTS_CONFIG.portFeePerTick * 24
+        : 0;
+      const dailyOperatingCost = crewWages + maintenance + portFees;
+
+      // =========================================================================
+      // Economic Model V2: Calculate credit status
+      // =========================================================================
+      const shipValue = ship.capacity * DEFAULT_CREDIT_CONFIG.baseValuePerCapacity;
+      const creditLimit = ship.creditLimit || shipValue * DEFAULT_CREDIT_CONFIG.baseCreditMultiplier;
+      const debtRatio = shipValue > 0 ? (ship.debt || 0) / shipValue : 0;
+      const creditCutOff = debtRatio >= DEFAULT_CREDIT_CONFIG.maxDebtRatio;
+      const availableCredit = creditCutOff ? 0 : Math.max(0, creditLimit - (ship.debt || 0));
+      const dailyInterestCost = (ship.debt || 0) * (ship.interestRate || DEFAULT_CREDIT_CONFIG.interestRatePerTick) * 24;
+
       const observable: ObservableShip = {
         id: shipId,
         name: ship.name,
@@ -375,6 +620,21 @@ export class ObservableBuilder {
                 etaHours: ship.location.route.etaHours,
                 progress: ship.location.route.progress,
               },
+        // Economic Model V2: Operating costs
+        dailyOperatingCost,
+        crew: {
+          count: ship.crew.count,
+          capacity: ship.crew.capacity,
+          morale: ship.crew.morale,
+        },
+        condition: ship.condition,
+        // Economic Model V2: Credit/Debt
+        debt: ship.debt || 0,
+        creditLimit,
+        availableCredit,
+        debtRatio,
+        interestRate: ship.interestRate || DEFAULT_CREDIT_CONFIG.interestRatePerTick,
+        dailyInterestCost,
       };
 
       result.set(shipId, observable);

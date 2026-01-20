@@ -292,6 +292,14 @@ function createShipFromOrder(
     crew: createDefaultCrew(blueprint.capacity),
     condition: 1.0, // New ships start at full condition
     totalDistanceTraveled: 0,
+    spoilageLossThisVoyage: new Map(),
+    cumulativeSpoilageLoss: 0,
+    lastKnownPrices: new Map(), // Price Discovery Lag: new ships have no price knowledge
+    // Credit/Debt System: new ships start debt-free with a default credit line
+    debt: 0,
+    creditLimit: blueprint.capacity * 10, // Default credit based on ship value
+    interestRate: 0.001, // Default interest rate per tick
+    cumulativeInterestPaid: 0,
   };
 }
 

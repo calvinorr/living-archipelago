@@ -259,21 +259,43 @@ export class AgentManager {
 
     if (!ship || !island) return;
 
-    const { newIslandInventory, newShipCargo, newShipCash, taxCollected } = executeTrade(
+    const {
+      newIslandInventory,
+      newShipCargo,
+      newShipCash,
+      taxCollected,
+      islandExportRevenue,
+      islandImportCost,
+    } = executeTrade(
       island.inventory,
       ship.cargo,
       ship.cash,
       action.transactions,
       island.market.prices,
-      this.config.transactionTaxRate
+      {
+        taxRate: this.config.transactionTaxRate,
+        // Economic Model V2: Enable purchasing power limits if island has treasury
+        islandTreasury: island.treasury ?? Infinity,
+        enforcePurchasingPower: island.treasury !== undefined,
+        maxSpendRatio: 0.1, // Islands can spend up to 10% of treasury per transaction
+      }
     );
 
     // Update ship
     const updatedShip = { ...ship, cargo: newShipCargo, cash: newShipCash };
     world.ships.set(action.shipId, updatedShip);
 
-    // Update island
-    const updatedIsland = { ...island, inventory: newIslandInventory };
+    // Economic Model V2: Update island with treasury changes
+    const updatedIsland = {
+      ...island,
+      inventory: newIslandInventory,
+      // Treasury changes: receives export revenue, pays import costs
+      treasury: (island.treasury ?? 0) + islandExportRevenue - islandImportCost,
+      treasuryIncome: (island.treasuryIncome ?? 0) + islandExportRevenue,
+      treasuryExpenses: (island.treasuryExpenses ?? 0) + islandImportCost,
+      cumulativeExportRevenue: (island.cumulativeExportRevenue ?? 0) + islandExportRevenue,
+      cumulativeImportCosts: (island.cumulativeImportCosts ?? 0) + islandImportCost,
+    };
     world.islands.set(action.islandId, updatedIsland);
 
     // Update economy metrics (tax is a currency sink - money destroyed)
@@ -313,6 +335,9 @@ export class AgentManager {
               momentum: new Map(island.market.momentum),
               consumptionVelocity: new Map(island.market.consumptionVelocity),
             },
+            // Economic Model V2: Reset per-tick treasury values
+            treasuryIncome: 0,
+            treasuryExpenses: 0,
           },
         ])
       ),
@@ -336,7 +361,7 @@ export class AgentManager {
       // Clone economy metrics for immutability
       economyMetrics: world.economyMetrics
         ? { ...world.economyMetrics }
-        : { taxCollectedThisTick: 0, totalTaxCollected: 0 },
+        : { taxCollectedThisTick: 0, totalTaxCollected: 0, taxRedistributedThisTick: 0, totalTaxRedistributed: 0 },
     };
   }
 

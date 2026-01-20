@@ -37,9 +37,17 @@ export interface LLMMetricsSummary {
  * Pricing per 1M tokens for supported models
  */
 const PRICING: Record<string, { input: number; output: number }> = {
+  // Gemini models
   'gemini-2.0-flash': { input: 0.10, output: 0.40 },
   'gemini-1.5-flash': { input: 0.075, output: 0.30 },
+  'gemini-1.5-flash-8b': { input: 0.0375, output: 0.15 }, // Cheapest Gemini!
   'gemini-1.5-pro': { input: 1.25, output: 5.00 },
+  // Groq (free tier)
+  'llama-3.1-8b-instant': { input: 0, output: 0 },
+  'llama-3.1-70b-versatile': { input: 0, output: 0 },
+  'mixtral-8x7b-32768': { input: 0, output: 0 },
+  // Mock
+  'mock-llm': { input: 0, output: 0 },
 };
 
 type MetricsListener = (record: LLMCallRecord) => void;

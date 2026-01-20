@@ -3,6 +3,7 @@
  * Handles good production based on labor, ecosystem, tools, and health
  * Based on 02_spec.md Section 4
  * Updated with harvest-production coupling (Track 03)
+ * Updated with supply shocks and variance (Economic Model V2)
  */
 
 import type {
@@ -14,6 +15,7 @@ import type {
 
 import { calculateYieldMultiplier } from './ecology.js';
 import { getWorkshopEffect } from './buildings.js';
+import { getProductionMultiplier, applyProductionVariance } from './supply-shocks.js';
 
 /**
  * Result of production calculation including harvest data (Track 03)
@@ -27,6 +29,8 @@ export interface ProductionResult {
   harvested: Map<GoodId, number>;
   /** Whether production was limited by ecosystem capacity */
   constrained: Map<GoodId, boolean>;
+  /** Supply shock multipliers applied per good (1.0 = no shock) */
+  shockMultipliers: Map<GoodId, number>;
 }
 
 /**
@@ -252,22 +256,51 @@ function getExtractiveStock(
 /**
  * Update island inventory with production for all goods (Track 03)
  * Returns ProductionResult with harvest data for ecosystem coupling
+ *
+ * Updated for Economic Model V2:
+ * - Applies supply shock multipliers from active boom/bust events
+ * - Applies random variance when RNG is provided
+ *
+ * @param island - Current island state
+ * @param goods - List of goods to produce
+ * @param config - Simulation configuration
+ * @param events - Active world events
+ * @param dt - Time delta
+ * @param currentTick - Current simulation tick (for shock expiration)
+ * @param rng - Optional seeded RNG function for production variance
  */
 export function updateProduction(
   island: IslandState,
   goods: GoodId[],
   config: SimulationConfig,
   events: WorldEvent[],
-  dt: number
+  dt: number,
+  currentTick: number = 0,
+  rng?: () => number
 ): ProductionResult {
   const newInventory = new Map(island.inventory);
   const produced = new Map<GoodId, number>();
   const harvested = new Map<GoodId, number>();
   const constrained = new Map<GoodId, boolean>();
+  const shockMultipliers = new Map<GoodId, number>();
 
   for (const goodId of goods) {
     // Calculate desired production (what labor/tools/health would produce)
-    const desiredProduction = calculateProduction(island, goodId, config, events, dt);
+    let desiredProduction = calculateProduction(island, goodId, config, events, dt);
+
+    // Apply supply shock multiplier (boom/bust effects)
+    const shockMult = getProductionMultiplier(island, goodId, currentTick);
+    shockMultipliers.set(goodId, shockMult);
+    desiredProduction *= shockMult;
+
+    // Apply random variance if RNG is provided
+    if (rng && config.supplyVolatilityConfig) {
+      desiredProduction = applyProductionVariance(
+        desiredProduction,
+        rng,
+        config.supplyVolatilityConfig
+      );
+    }
 
     let actualProduction = desiredProduction;
     let harvestAmount = 0;
@@ -311,17 +344,24 @@ export function updateProduction(
     constrained.set(goodId, wasConstrained);
   }
 
-  return { newInventory, produced, harvested, constrained };
+  return { newInventory, produced, harvested, constrained, shockMultipliers };
 }
 
 /**
  * Get production breakdown for debugging/UI
+ *
+ * @param island - Current island state
+ * @param goodId - Good to analyze
+ * @param config - Simulation configuration
+ * @param events - Active world events
+ * @param currentTick - Current tick for shock expiration (optional)
  */
 export function getProductionBreakdown(
   island: IslandState,
   goodId: GoodId,
   config: SimulationConfig,
-  events: WorldEvent[]
+  events: WorldEvent[],
+  currentTick: number = 0
 ): {
   baseRate: number;
   labourModifier: number;
@@ -330,6 +370,7 @@ export function getProductionBreakdown(
   healthModifier: number;
   eventModifier: number;
   buildingModifier: number;
+  shockMultiplier: number;
   effectiveRate: number;
 } {
   const baseRate = island.productionParams.baseRate.get(goodId) ?? 0;
@@ -362,6 +403,9 @@ export function getProductionBreakdown(
     buildingMod = workshopEffect.toolProductionBonus;
   }
 
+  // Get supply shock multiplier
+  const shockMult = getProductionMultiplier(island, goodId, currentTick);
+
   return {
     baseRate,
     labourModifier: labourMod,
@@ -370,6 +414,7 @@ export function getProductionBreakdown(
     healthModifier: healthMod,
     eventModifier: eventMod,
     buildingModifier: buildingMod,
-    effectiveRate: baseRate * labourMod * ecoMod * toolMod * healthMod * eventMod * buildingMod,
+    shockMultiplier: shockMult,
+    effectiveRate: baseRate * labourMod * ecoMod * toolMod * healthMod * eventMod * buildingMod * shockMult,
   };
 }

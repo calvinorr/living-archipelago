@@ -29,3 +29,189 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* ========================================
+   Map Animations & Effects
+   ======================================== */
+
+/* Route dash animation */
+@keyframes dash {
+  to {
+    stroke-dashoffset: -20;
+  }
+}
+
+.animate-dash {
+  animation: dash 0.8s linear infinite;
+}
+
+/* Slow spin for selection indicators */
+@keyframes spin-slow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin-slow {
+  animation: spin-slow 10s linear infinite;
+}
+
+/* Water wave drift animation */
+@keyframes water-drift {
+  0% {
+    transform: translateX(0) translateY(0);
+  }
+  50% {
+    transform: translateX(-10px) translateY(5px);
+  }
+  100% {
+    transform: translateX(0) translateY(0);
+  }
+}
+
+.animate-water-drift {
+  animation: water-drift 8s ease-in-out infinite;
+}
+
+/* Ship wake animation */
+@keyframes wake {
+  0% {
+    opacity: 0.6;
+    transform: scaleY(1);
+  }
+  50% {
+    opacity: 0.4;
+    transform: scaleY(1.1);
+  }
+  100% {
+    opacity: 0.6;
+    transform: scaleY(1);
+  }
+}
+
+.animate-wake {
+  animation: wake 1.5s ease-in-out infinite;
+}
+
+/* Wake center line animation */
+@keyframes wake-center {
+  to {
+    stroke-dashoffset: -16;
+  }
+}
+
+.animate-wake-center {
+  animation: wake-center 0.5s linear infinite;
+}
+
+/* Sail billowing animation */
+@keyframes sail {
+  0% {
+    transform: scaleX(1);
+  }
+  50% {
+    transform: scaleX(1.1);
+  }
+  100% {
+    transform: scaleX(1);
+  }
+}
+
+.animate-sail {
+  animation: sail 2s ease-in-out infinite;
+  transform-origin: center;
+}
+
+/* Radial vignette effect for map */
+.bg-radial-vignette {
+  background: radial-gradient(
+    ellipse at center,
+    transparent 0%,
+    transparent 50%,
+    rgba(15, 23, 42, 0.4) 80%,
+    rgba(15, 23, 42, 0.8) 100%
+  );
+}
+
+/* Glow pulse for active elements */
+@keyframes glow-pulse {
+  0%, 100% {
+    filter: drop-shadow(0 0 4px rgba(59, 130, 246, 0.5));
+  }
+  50% {
+    filter: drop-shadow(0 0 12px rgba(59, 130, 246, 0.8));
+  }
+}
+
+.animate-glow-pulse {
+  animation: glow-pulse 2s ease-in-out infinite;
+}
+
+/* Shimmer effect for highlighting */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.animate-shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.1) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 3s ease-in-out infinite;
+}
+
+/* Floating animation for ships at anchor */
+@keyframes float {
+  0%, 100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-3px);
+  }
+}
+
+.animate-float {
+  animation: float 3s ease-in-out infinite;
+}
+
+/* Wave ripple effect */
+@keyframes ripple {
+  0% {
+    transform: scale(1);
+    opacity: 0.4;
+  }
+  100% {
+    transform: scale(1.5);
+    opacity: 0;
+  }
+}
+
+.animate-ripple {
+  animation: ripple 2s ease-out infinite;
+}
+
+/* Compass needle wobble */
+@keyframes compass-wobble {
+  0%, 100% {
+    transform: rotate(-2deg);
+  }
+  50% {
+    transform: rotate(2deg);
+  }
+}
+
+.animate-compass {
+  animation: compass-wobble 4s ease-in-out infinite;
+  transform-origin: center bottom;
+}

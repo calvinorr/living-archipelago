@@ -1,5 +1,8 @@
 # Implementation Plans: Economic Model Improvements
 
+> **Note**: The primary documentation is now [`/ECONOMIC_MODEL.md`](../../ECONOMIC_MODEL.md).
+> These track files contain detailed implementation specifications for reference.
+
 This directory contains detailed implementation plans ("tracks") for addressing critical and high-priority issues identified in the Economic Model Review.
 
 ---

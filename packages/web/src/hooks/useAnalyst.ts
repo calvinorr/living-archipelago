@@ -13,21 +13,28 @@ import type {
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 interface AnalystStore extends AnalystState {
+  // Additional state
+  currentRunId: number | null;
+  hasAppliedChanges: boolean;
+  isResetting: boolean;
   // Actions
   fetchRuns: () => Promise<void>;
   selectRun: (runId: number) => Promise<void>;
   deleteRun: (runId: number) => Promise<void>;
+  deleteAllRuns: () => Promise<void>;
   analyzeRun: (runId: number) => Promise<void>;
   sendChatMessage: (message: string) => Promise<void>;
   applyImprovement: (improvementId: string) => Promise<void>;
   rejectImprovement: (improvementId: string) => void;
+  resetSimulation: () => Promise<void>;
   clearError: () => void;
   reset: () => void;
 }
 
-const initialState: AnalystState = {
+const initialState: AnalystState & { currentRunId: number | null; hasAppliedChanges: boolean; isResetting: boolean } = {
   runs: [],
   selectedRunId: null,
+  currentRunId: null,
   runData: null,
   analysis: null,
   isAnalyzing: false,
@@ -35,6 +42,8 @@ const initialState: AnalystState = {
   isChatting: false,
   improvements: [],
   error: null,
+  hasAppliedChanges: false,
+  isResetting: false,
 };
 
 export const useAnalyst = create<AnalystStore>((set, get) => ({
@@ -45,7 +54,7 @@ export const useAnalyst = create<AnalystStore>((set, get) => ({
       const response = await fetch(`${API_BASE}/api/analyst/runs`);
       if (!response.ok) throw new Error('Failed to fetch runs');
       const data = await response.json();
-      set({ runs: data.runs || [], error: null });
+      set({ runs: data.runs || [], currentRunId: data.currentRunId || null, error: null });
     } catch (error) {
       set({ error: error instanceof Error ? error.message : 'Failed to fetch runs' });
     }
@@ -70,9 +79,12 @@ export const useAnalyst = create<AnalystStore>((set, get) => ({
         method: 'DELETE',
       });
 
+      const data = await response.json().catch(() => ({ error: 'Invalid response from server' }));
+
       if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.error || 'Failed to delete run');
+        // Show the specific error from the API (e.g., "Cannot delete the currently active run")
+        set({ error: data.error || `Failed to delete run (status ${response.status})` });
+        return;
       }
 
       // Clear selection if we deleted the selected run
@@ -84,7 +96,33 @@ export const useAnalyst = create<AnalystStore>((set, get) => ({
       // Refresh runs list
       get().fetchRuns();
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : 'Failed to delete run' });
+      // Network error or other fetch failure
+      const message = error instanceof Error ? error.message : 'Network error';
+      set({ error: `Failed to delete run: ${message}` });
+    }
+  },
+
+  deleteAllRuns: async () => {
+    try {
+      const response = await fetch(`${API_BASE}/api/analyst/runs`, {
+        method: 'DELETE',
+      });
+
+      const data = await response.json().catch(() => ({ error: 'Invalid response from server' }));
+
+      if (!response.ok) {
+        set({ error: data.error || 'Failed to delete runs' });
+        return;
+      }
+
+      // Clear selection since runs are deleted
+      set({ selectedRunId: null, runData: null, analysis: null });
+
+      // Refresh runs list
+      get().fetchRuns();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Network error';
+      set({ error: `Failed to delete runs: ${message}` });
     }
   },
 
@@ -181,6 +219,13 @@ export const useAnalyst = create<AnalystStore>((set, get) => ({
     const improvement = improvements.find((i) => i.id === improvementId);
     if (!improvement) return;
 
+    // Mark as applying
+    set((state) => ({
+      improvements: state.improvements.map((i) =>
+        i.id === improvementId ? { ...i, status: 'applying' as const } : i
+      ),
+    }));
+
     try {
       const response = await fetch(`${API_BASE}/api/analyst/improvements/apply`, {
         method: 'POST',
@@ -191,20 +236,37 @@ export const useAnalyst = create<AnalystStore>((set, get) => ({
         }),
       });
 
+      const data = await response.json().catch(() => ({ error: 'Invalid response from server' }));
+
       if (!response.ok) {
-        throw new Error('Failed to apply improvement');
+        // Revert to pending status and show error
+        set((state) => ({
+          improvements: state.improvements.map((i) =>
+            i.id === improvementId ? { ...i, status: 'pending' as const } : i
+          ),
+          error: `Failed to apply "${improvement.title}": ${data.error || 'Unknown error'}. Config path: ${improvement.configPath}`,
+        }));
+        return;
       }
 
-      // Update improvement status
+      // Update improvement status to applied and flag that changes were made
       set((state) => ({
         improvements: state.improvements.map((i) =>
           i.id === improvementId
             ? { ...i, status: 'applied' as const, appliedAt: new Date().toISOString() }
             : i
         ),
+        error: null,
+        hasAppliedChanges: true,
       }));
     } catch (error) {
-      set({ error: error instanceof Error ? error.message : 'Failed to apply improvement' });
+      // Revert to pending on network error
+      set((state) => ({
+        improvements: state.improvements.map((i) =>
+          i.id === improvementId ? { ...i, status: 'pending' as const } : i
+        ),
+        error: `Network error applying "${improvement.title}": ${error instanceof Error ? error.message : 'Unknown error'}`,
+      }));
     }
   },
 
@@ -214,6 +276,44 @@ export const useAnalyst = create<AnalystStore>((set, get) => ({
         i.id === improvementId ? { ...i, status: 'rejected' as const } : i
       ),
     }));
+  },
+
+  resetSimulation: async () => {
+    set({ isResetting: true, error: null });
+
+    try {
+      const response = await fetch(`${API_BASE}/api/simulation/reset`, {
+        method: 'POST',
+      });
+
+      const data = await response.json().catch(() => ({ error: 'Invalid response' }));
+
+      if (!response.ok) {
+        set({ error: data.error || 'Failed to reset simulation', isResetting: false });
+        return;
+      }
+
+      // Reset analyst state for new run
+      set({
+        selectedRunId: data.newRunId,
+        currentRunId: data.newRunId,
+        runData: null,
+        analysis: null,
+        chatMessages: [],
+        improvements: [],
+        hasAppliedChanges: false,
+        isResetting: false,
+        error: null,
+      });
+
+      // Refresh runs list
+      get().fetchRuns();
+    } catch (error) {
+      set({
+        error: `Reset failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        isResetting: false,
+      });
+    }
   },
 
   clearError: () => set({ error: null }),

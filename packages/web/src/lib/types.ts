@@ -34,9 +34,20 @@ export interface PopulationSnapshot {
   };
 }
 
+/**
+ * Market depth snapshot for an island (Economic Model V2)
+ * Tracks available liquidity for price impact calculations
+ */
+export interface MarketDepthSnapshot {
+  buyDepth: Record<string, number>;
+  sellDepth: Record<string, number>;
+}
+
 export interface MarketSnapshot {
   prices: Record<string, number>;
   idealStock: Record<string, number>;
+  /** Market depth for price impact calculations (Economic Model V2) */
+  depth?: MarketDepthSnapshot;
 }
 
 export interface BuildingSnapshot {
@@ -44,6 +55,14 @@ export interface BuildingSnapshot {
   type: 'warehouse' | 'market' | 'port' | 'workshop';
   level: number;
   condition: number;
+}
+
+export interface TreasurySnapshot {
+  balance: number;
+  income: number;      // Income this tick
+  expenses: number;    // Expenses this tick
+  cumulativeExportRevenue: number;
+  cumulativeImportCosts: number;
 }
 
 export interface IslandSnapshot {
@@ -55,6 +74,8 @@ export interface IslandSnapshot {
   inventory: Record<string, number>;
   market: MarketSnapshot;
   buildings?: BuildingSnapshot[];
+  // Economic Model V2: Island Treasury
+  treasury?: TreasurySnapshot;
 }
 
 export interface RouteSnapshot {
@@ -70,6 +91,45 @@ export interface CrewSnapshot {
   morale: number;
 }
 
+/**
+ * Price knowledge snapshot for an island (Price Discovery Lag)
+ */
+export interface PriceKnowledgeSnapshot {
+  prices: Record<string, number>;
+  tick: number; // When prices were observed
+  age: number; // Current tick - observed tick
+  isStale: boolean; // True if age > 24 ticks
+}
+
+/**
+ * Ship's price knowledge across all islands (Price Discovery Lag)
+ */
+export interface LastKnownPricesSnapshot {
+  [islandId: string]: PriceKnowledgeSnapshot;
+}
+
+/**
+ * Credit/debt status for display (Economic Model V2)
+ */
+export interface CreditSnapshot {
+  debt: number; // Current outstanding debt
+  creditLimit: number; // Maximum borrowing capacity
+  interestRate: number; // Interest rate per tick
+  cumulativeInterestPaid: number; // Total interest paid over ship lifetime
+  availableCredit: number; // creditLimit - debt (how much more can borrow)
+  debtRatio: number; // debt / shipValue (0-1)
+}
+
+/**
+ * Operating costs per-tick estimate for display
+ */
+export interface OperatingCostsSnapshot {
+  crewWages: number; // Per-tick crew wages
+  maintenance: number; // Per-tick maintenance cost
+  portFees: number; // Per-tick port fees (only when docked)
+  total: number; // Total per-tick operating costs
+}
+
 export interface ShipSnapshot {
   id: string;
   name: string;
@@ -83,6 +143,15 @@ export interface ShipSnapshot {
     | { kind: 'at_sea'; position: Vector2; route: RouteSnapshot };
   crew?: CrewSnapshot;
   condition?: number; // 0-1, ship hull condition (Track 08)
+  // Spoilage tracking (Economic Model V2)
+  spoilageLossThisVoyage?: Record<string, number>;
+  cumulativeSpoilageLoss?: number;
+  // Price Discovery Lag (Economic Model V2)
+  lastKnownPrices?: LastKnownPricesSnapshot;
+  // Operating costs (Economic Model V2)
+  operatingCosts?: OperatingCostsSnapshot;
+  // Credit/Debt System (Economic Model V2)
+  credit?: CreditSnapshot;
 }
 
 export interface EventSnapshot {
@@ -97,6 +166,8 @@ export interface EventSnapshot {
 export interface EconomyMetricsSnapshot {
   taxCollectedThisTick: number;
   totalTaxCollected: number;
+  taxRedistributedThisTick: number;
+  totalTaxRedistributed: number;
 }
 
 export interface AgentDecision {

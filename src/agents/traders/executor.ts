@@ -1,6 +1,13 @@
 /**
  * Rule-Based Executor
  * Tactical decision-making based on strategy from LLM
+ *
+ * Economic Model V2 Updates:
+ * - Operating costs awareness in profit calculations
+ * - Credit/debt management
+ * - Price staleness consideration
+ * - Market depth (slippage) estimation
+ * - Island treasury (purchasing power) checks
  */
 
 import type { GoodId, IslandId, TransportCostBreakdown } from '../../core/types.js';
@@ -12,6 +19,7 @@ import type {
 import type { Action, Transaction } from '../interfaces/action.js';
 import { createTradeAction, createNavigateAction, createWaitAction } from '../interfaces/action.js';
 import type { Strategy, TraderMemory } from './memory.js';
+import { DEFAULT_MARKET_DEPTH_CONFIG } from '../../core/world.js';
 
 /**
  * Shipping cost configuration for the executor
@@ -40,6 +48,22 @@ function getBulkiness(goodId: GoodId): number {
 }
 
 /**
+ * Spoilage rates for goods (per hour)
+ * Must match world.ts definitions
+ */
+const GOOD_SPOILAGE: Record<string, number> = {
+  fish: 0.02,
+  grain: 0.001,
+  timber: 0,
+  tools: 0,
+  luxuries: 0,
+};
+
+function getSpoilageRate(goodId: GoodId): number {
+  return GOOD_SPOILAGE[goodId] ?? 0;
+}
+
+/**
  * Executor configuration
  */
 export interface ExecutorConfig {
@@ -53,6 +77,35 @@ export interface ExecutorConfig {
   sellFirst: boolean;
   /** Shipping cost configuration */
   shippingCosts: ShippingCostConfig;
+  // =========================================================================
+  // Economic Model V2 Configuration
+  // =========================================================================
+  /** Maximum debt-to-value ratio to accept (0.5 = 50%) */
+  maxAcceptableDebtRatio: number;
+  /** Discount factor for stale prices (per tick of age) */
+  stalePriceDiscountPerTick: number;
+  /** Maximum price age in ticks before considering exploration */
+  maxPriceAge: number;
+  /** Minimum required depth as fraction of trade quantity */
+  minDepthRatio: number;
+  /** Maximum fraction of island treasury to expect as payment */
+  maxTreasuryFraction: number;
+}
+
+/**
+ * Comprehensive profit evaluation result (Economic Model V2)
+ */
+export interface ProfitEvaluation {
+  profitable: boolean;
+  netMargin: number;
+  transportCost: number;
+  operatingCost: number;
+  interestCost: number;
+  spoilageLoss: number;
+  slippageCost: number;
+  stalePriceDiscount: number;
+  treasuryLimited: boolean;
+  adjustedQuantity: number;
 }
 
 const DEFAULT_CONFIG: ExecutorConfig = {
@@ -66,6 +119,12 @@ const DEFAULT_CONFIG: ExecutorConfig = {
     perVolumeHandlingCost: 0.05,
     emptyReturnMultiplier: 0.5,
   },
+  // Economic Model V2 defaults
+  maxAcceptableDebtRatio: 0.5, // Stay under 50% debt-to-value
+  stalePriceDiscountPerTick: 0.005, // 0.5% discount per tick of staleness
+  maxPriceAge: 48, // 2 days before we really want to explore
+  minDepthRatio: 0.5, // Need at least 50% of trade quantity in depth
+  maxTreasuryFraction: 0.5, // Don't expect island to spend more than 50% treasury
 };
 
 /**
@@ -183,6 +242,7 @@ export class Executor {
 
   /**
    * Create sell transactions for current cargo
+   * Updated for Economic Model V2 with treasury-aware quantity limiting
    */
   private createSellAction(
     ship: ObservableShip,
@@ -199,12 +259,35 @@ export class Executor {
       if (!price) continue;
 
       // Check if this is a good place to sell
-      const shouldSell = this.shouldSell(goodId, island, strategy, observation);
-      if (shouldSell) {
-        transactions.push({
-          goodId,
-          quantity: -quantity, // Negative = sell
-        });
+      const doSell = this.shouldSell(goodId, island, strategy, observation, ship, quantity);
+      if (doSell) {
+        // Economic Model V2: Limit sell quantity by island treasury
+        let sellQuantity = quantity;
+        if (island.importBudget !== undefined) {
+          const maxAffordable = Math.floor(island.importBudget / price);
+          const maxByTreasury = Math.floor(maxAffordable * this.config.maxTreasuryFraction);
+          if (maxByTreasury < sellQuantity && maxByTreasury > 0) {
+            // Sell only what island can afford (partial sell)
+            sellQuantity = maxByTreasury;
+          }
+        }
+
+        // Economic Model V2: Limit by market depth to avoid excessive slippage
+        if (island.sellDepth) {
+          const depth = island.sellDepth.get(goodId) ?? DEFAULT_MARKET_DEPTH_CONFIG.minDepth;
+          // Don't sell more than 2x the available depth (would cause severe slippage)
+          const maxByDepth = Math.floor(depth * 2);
+          if (maxByDepth < sellQuantity && maxByDepth > 0) {
+            sellQuantity = maxByDepth;
+          }
+        }
+
+        if (sellQuantity > 0) {
+          transactions.push({
+            goodId,
+            quantity: -sellQuantity, // Negative = sell
+          });
+        }
       }
     }
 
@@ -215,15 +298,29 @@ export class Executor {
 
   /**
    * Determine if we should sell a good at this island
+   * Updated for Economic Model V2 with treasury and depth awareness
    */
   private shouldSell(
     goodId: GoodId,
     island: ObservableIsland,
     strategy: Strategy | null,
-    observation: ObservableState
+    observation: ObservableState,
+    ship?: ObservableShip,
+    quantity?: number
   ): boolean {
     const price = island.prices.get(goodId) ?? 0;
     if (price <= 0) return false;
+
+    // =========================================================================
+    // Economic Model V2: Check island treasury (can they afford to buy?)
+    // =========================================================================
+    if (island.importBudget !== undefined && quantity !== undefined) {
+      const maxAffordable = island.importBudget / price;
+      if (quantity > maxAffordable * 2) {
+        // Island can't afford even half our cargo - maybe wait or find another buyer
+        // But still sell if it's a strategy destination or price is very good
+      }
+    }
 
     // Check if this is a destination in our strategy
     if (strategy) {
@@ -231,6 +328,25 @@ export class Executor {
         (r) => r.to === island.id && r.goods.includes(goodId)
       );
       if (isDestination) return true;
+    }
+
+    // =========================================================================
+    // Economic Model V2: Consider selling to pay down debt
+    // =========================================================================
+    if (ship && ship.debtRatio > this.config.maxAcceptableDebtRatio * 0.8) {
+      // Ship has significant debt - more willing to sell even at lower margins
+      // to generate cash for debt repayment
+      const marginThreshold = this.config.minProfitMargin * 0.5; // Accept half the normal margin
+
+      // Find lowest price across islands
+      let lowestPrice = price;
+      for (const i of observation.islands.values()) {
+        const p = i.prices.get(goodId);
+        if (p && p > 0 && p < lowestPrice) lowestPrice = p;
+      }
+
+      const marginFromLowest = (price - lowestPrice) / lowestPrice;
+      if (marginFromLowest >= marginThreshold) return true;
     }
 
     // Find lowest price across islands (where we likely bought)
@@ -323,6 +439,7 @@ export class Executor {
 
   /**
    * Find goods to buy based on strategy and market conditions
+   * Updated for Economic Model V2 with comprehensive cost awareness
    */
   private findGoodsToBuy(
     island: ObservableIsland,
@@ -332,8 +449,18 @@ export class Executor {
   ): Array<{ goodId: GoodId; quantity: number }> {
     const result: Array<{ goodId: GoodId; quantity: number; score: number }> = [];
 
+    // =========================================================================
+    // Economic Model V2: Check if ship should avoid buying due to high debt
+    // =========================================================================
+    if (ship.debtRatio > this.config.maxAcceptableDebtRatio) {
+      // High debt - prioritize paying it down by selling, not buying more
+      return [];
+    }
+
     // Calculate max capacity based on ship constraints
-    const availableCash = ship.cash * (1 - this.config.cashReserve);
+    // Economic Model V2: Consider available credit when calculating cash
+    const cashWithCredit = ship.cash + (ship.availableCredit * 0.5); // Only use half of credit for buying
+    const availableCash = cashWithCredit * (1 - this.config.cashReserve);
     const maxSpace = ship.remainingCapacity * this.config.maxCargoFill;
 
     // Check strategy routes
@@ -354,23 +481,46 @@ export class Executor {
             const maxBySpace = Math.floor(maxSpace / bulkiness);
             const maxByCash = Math.floor(availableCash / buyPrice);
             const available = island.inventory?.get(goodId) ?? 0;
-            const quantity = Math.min(maxBySpace, maxByCash, available, 100); // Cap at 100 per good
+
+            // Economic Model V2: Limit by market depth at destination
+            let maxByDepth = 100; // Default cap
+            if (destIsland.sellDepth) {
+              const depth = destIsland.sellDepth.get(goodId) ?? DEFAULT_MARKET_DEPTH_CONFIG.minDepth;
+              maxByDepth = Math.floor(depth / this.config.minDepthRatio);
+            }
+
+            // Economic Model V2: Limit by island treasury
+            let maxByTreasury = 100;
+            if (destIsland.importBudget !== undefined) {
+              maxByTreasury = Math.floor((destIsland.importBudget * this.config.maxTreasuryFraction) / sellPrice);
+            }
+
+            const quantity = Math.min(maxBySpace, maxByCash, available, maxByDepth, maxByTreasury, 100);
 
             if (quantity > 0) {
-              // Evaluate profitability with transport costs
-              const evaluation = this.evaluateRouteProfitability(
+              // Evaluate profitability with ALL costs (Economic Model V2)
+              const evaluation = this.evaluateRouteProfitabilityV2(
                 island,
                 destIsland,
                 goodId,
                 quantity,
-                observation
+                observation,
+                ship
               );
 
               if (evaluation.profitable) {
+                // Economic Model V2: Adjust score based on price data freshness
+                let freshnessBonus = 1.0;
+                if (!island.pricesStale && !destIsland.pricesStale) {
+                  freshnessBonus = 1.2; // 20% bonus for fresh data
+                } else if (island.pricesStale || destIsland.pricesStale) {
+                  freshnessBonus = 0.8; // 20% penalty for stale data
+                }
+
                 result.push({
                   goodId,
-                  quantity,
-                  score: evaluation.netMargin * route.priority, // Use net margin instead of gross
+                  quantity: evaluation.adjustedQuantity,
+                  score: evaluation.netMargin * route.priority * freshnessBonus,
                 });
               }
             }
@@ -393,20 +543,21 @@ export class Executor {
           const quantity = Math.min(maxBySpace, maxByCash, available, 50);
 
           if (quantity > 0) {
-            // Evaluate profitability with transport costs for arbitrage too
-            const evaluation = this.evaluateRouteProfitability(
+            // Evaluate profitability with ALL costs (Economic Model V2)
+            const evaluation = this.evaluateRouteProfitabilityV2(
               island,
               destIsland,
               arb.goodId,
               quantity,
-              observation
+              observation,
+              ship
             );
 
             if (evaluation.profitable) {
               result.push({
                 goodId: arb.goodId,
-                quantity,
-                score: evaluation.netMargin, // Use net margin instead of gross
+                quantity: evaluation.adjustedQuantity,
+                score: evaluation.netMargin,
               });
             }
           }
@@ -432,7 +583,7 @@ export class Executor {
       const island = observation.islands.get(currentIsland);
       if (island) {
         for (const [goodId, qty] of ship.cargo) {
-          if (qty > 0 && this.shouldSell(goodId, island, strategy, observation)) {
+          if (qty > 0 && this.shouldSell(goodId, island, strategy, observation, ship, qty)) {
             return null; // Stay to sell
           }
         }
@@ -451,6 +602,7 @@ export class Executor {
 
   /**
    * Find best destination for ship
+   * Updated for Economic Model V2 with price freshness and exploration
    */
   private findDestination(
     ship: ObservableShip,
@@ -470,15 +622,34 @@ export class Executor {
           }
         }
 
-        // Find best selling location
+        // Find best selling location (Economic Model V2: factor in price freshness)
         let bestIsland: IslandId | null = null;
-        let bestPrice = 0;
+        let bestScore = 0;
 
         for (const [islandId, island] of observation.islands) {
           if (islandId === currentIsland) continue;
           const price = island.prices.get(goodId) ?? 0;
-          if (price > bestPrice) {
-            bestPrice = price;
+          if (price <= 0) continue;
+
+          // Base score is the price
+          let score = price;
+
+          // Economic Model V2: Discount stale prices
+          if (island.pricesStale) {
+            const ageDiscount = 1 - (island.priceAge * this.config.stalePriceDiscountPerTick);
+            score *= Math.max(0.5, ageDiscount); // At least 50% of original score
+          }
+
+          // Economic Model V2: Bonus for islands with good treasury
+          if (island.importBudget !== undefined) {
+            const cargoValue = (ship.cargo.get(goodId) ?? 0) * price;
+            if (island.importBudget >= cargoValue) {
+              score *= 1.1; // 10% bonus for islands that can afford our cargo
+            }
+          }
+
+          if (score > bestScore) {
+            bestScore = score;
             bestIsland = islandId;
           }
         }
@@ -495,6 +666,28 @@ export class Executor {
       } else if (topRoute.to !== currentIsland) {
         return topRoute.to;
       }
+    }
+
+    // =========================================================================
+    // Economic Model V2: Exploration when prices are stale
+    // =========================================================================
+    // If all known prices are stale, prioritize visiting islands with oldest data
+    const allStale = Array.from(observation.islands.values()).every(i => i.pricesStale);
+    if (allStale || strategy?.primaryGoal === 'explore') {
+      let oldestIsland: IslandId | null = null;
+      let oldestAge = -1;
+
+      for (const [islandId, island] of observation.islands) {
+        if (islandId === currentIsland) continue;
+        // priceAge of -1 means never visited - highest priority
+        const effectiveAge = island.priceAge === -1 ? 10000 : island.priceAge;
+        if (effectiveAge > oldestAge) {
+          oldestAge = effectiveAge;
+          oldestIsland = islandId;
+        }
+      }
+
+      if (oldestIsland) return oldestIsland;
     }
 
     // Fallback: go to best arbitrage source
@@ -542,40 +735,174 @@ export class Executor {
   }
 
   /**
-   * Evaluate if a trade route is profitable after transport costs
+   * Evaluate if a trade route is profitable after ALL costs (Economic Model V2)
+   *
+   * New formula:
+   * grossProfit = (sellPrice - buyPrice) * quantity
+   * slippageCost = estimatedSlippage(quantity, depth)
+   * operatingCosts = dailyCost * estimatedTripDays
+   * interestCost = currentDebt * interestRate * estimatedTripDays
+   * spoilageLoss = quantity * spoilageRate * tripHours * avgPrice
+   * stalePriceDiscount = profit * priceAge * discountPerTick
+   * netProfit = grossProfit - slippageCost - operatingCosts - interestCost - spoilageLoss - stalePriceDiscount
    */
-  private evaluateRouteProfitability(
+  /**
+   * Full Economic Model V2 profit evaluation with detailed breakdown
+   *
+   * Comprehensive profit calculation including:
+   * - Transport costs (distance, volume, handling)
+   * - Operating costs (crew wages, maintenance, port fees)
+   * - Interest costs on debt
+   * - Spoilage losses for perishable goods
+   * - Market slippage from depth consumption
+   * - Price staleness discount
+   */
+  private evaluateRouteProfitabilityV2(
     fromIsland: ObservableIsland,
     toIsland: ObservableIsland,
     goodId: GoodId,
     quantity: number,
-    _observation: ObservableState
-  ): { profitable: boolean; netMargin: number; transportCost: number } {
+    _observation: ObservableState,
+    ship?: ObservableShip
+  ): ProfitEvaluation {
     const buyPrice = fromIsland.prices.get(goodId) ?? 0;
     const sellPrice = toIsland.prices.get(goodId) ?? 0;
 
+    // Base case: no profit possible
     if (buyPrice <= 0 || sellPrice <= buyPrice) {
-      return { profitable: false, netMargin: 0, transportCost: 0 };
+      return {
+        profitable: false,
+        netMargin: 0,
+        transportCost: 0,
+        operatingCost: 0,
+        interestCost: 0,
+        spoilageLoss: 0,
+        slippageCost: 0,
+        stalePriceDiscount: 0,
+        treasuryLimited: false,
+        adjustedQuantity: quantity,
+      };
     }
 
-    // Calculate cargo volume for this trade
+    // =========================================================================
+    // Calculate distance and trip time
+    // =========================================================================
+    const dx = toIsland.position.x - fromIsland.position.x;
+    const dy = toIsland.position.y - fromIsland.position.y;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    const shipSpeed = ship?.speed ?? 10; // Default speed if no ship provided
+    const tripHours = distance / shipSpeed;
+    const tripDays = tripHours / 24;
+
+    // =========================================================================
+    // Check island treasury (can they afford to buy?)
+    // =========================================================================
+    let adjustedQuantity = quantity;
+    let treasuryLimited = false;
+    if (toIsland.importBudget !== undefined) {
+      const maxAffordable = Math.floor(toIsland.importBudget / sellPrice);
+      const maxByTreasury = Math.floor(maxAffordable * this.config.maxTreasuryFraction);
+      if (maxByTreasury < quantity) {
+        adjustedQuantity = Math.max(1, maxByTreasury);
+        treasuryLimited = true;
+      }
+    }
+
+    // =========================================================================
+    // Calculate cargo volume
+    // =========================================================================
     const bulkiness = getBulkiness(goodId);
-    const cargoVolume = quantity * bulkiness;
+    const cargoVolume = adjustedQuantity * bulkiness;
 
-    // Calculate transport costs
+    // =========================================================================
+    // Transport costs (existing)
+    // =========================================================================
     const transport = this.calculateRouteTransportCost(fromIsland, toIsland, cargoVolume);
+    const transportCost = transport.totalRoundTrip;
 
-    // Calculate profit
-    const revenue = quantity * sellPrice;
-    const cost = quantity * buyPrice;
-    const grossProfit = revenue - cost;
-    const netProfit = grossProfit - transport.totalRoundTrip;
-    const netMargin = netProfit / cost;
+    // =========================================================================
+    // Operating costs (Economic Model V2)
+    // =========================================================================
+    const dailyOperatingCost = ship?.dailyOperatingCost ?? 50; // Default estimate
+    const operatingCost = dailyOperatingCost * tripDays;
+
+    // =========================================================================
+    // Interest costs (Economic Model V2)
+    // =========================================================================
+    const currentDebt = ship?.debt ?? 0;
+    const interestRate = ship?.interestRate ?? 0.001;
+    const interestCost = currentDebt * interestRate * tripHours;
+
+    // =========================================================================
+    // Spoilage loss (Economic Model V2)
+    // =========================================================================
+    const spoilageRate = getSpoilageRate(goodId);
+    const avgPrice = (buyPrice + sellPrice) / 2;
+    const spoilageFraction = Math.min(1, spoilageRate * tripHours);
+    const spoilageLoss = adjustedQuantity * spoilageFraction * avgPrice;
+
+    // =========================================================================
+    // Slippage cost from market depth (Economic Model V2)
+    // =========================================================================
+    let slippageCost = 0;
+    if (toIsland.sellDepth) {
+      // When selling to island, we consume their buy depth
+      const availableDepth = toIsland.sellDepth.get(goodId) ?? DEFAULT_MARKET_DEPTH_CONFIG.minDepth;
+      const depthRatio = adjustedQuantity / Math.max(availableDepth, DEFAULT_MARKET_DEPTH_CONFIG.minDepth);
+
+      // Calculate price impact (similar to market-depth.ts)
+      let priceImpact: number;
+      if (depthRatio <= 1) {
+        priceImpact = depthRatio * DEFAULT_MARKET_DEPTH_CONFIG.priceImpactCoefficient;
+      } else {
+        const withinDepthImpact = DEFAULT_MARKET_DEPTH_CONFIG.priceImpactCoefficient;
+        const excessRatio = depthRatio - 1;
+        const excessImpact = excessRatio * excessRatio * DEFAULT_MARKET_DEPTH_CONFIG.priceImpactCoefficient * 2;
+        priceImpact = withinDepthImpact + excessImpact;
+      }
+      priceImpact = Math.min(priceImpact, 0.5); // Cap at 50%
+
+      // Slippage reduces effective sell price
+      slippageCost = adjustedQuantity * sellPrice * priceImpact;
+    }
+
+    // =========================================================================
+    // Stale price discount (Economic Model V2)
+    // =========================================================================
+    let stalePriceDiscount = 0;
+    const priceAge = Math.max(fromIsland.priceAge, toIsland.priceAge);
+    if (priceAge > 0) {
+      // Apply discount for uncertainty due to stale prices
+      const grossProfit = (sellPrice - buyPrice) * adjustedQuantity;
+      stalePriceDiscount = grossProfit * priceAge * this.config.stalePriceDiscountPerTick;
+    }
+
+    // =========================================================================
+    // Calculate net profit
+    // =========================================================================
+    const revenue = adjustedQuantity * sellPrice;
+    const purchaseCost = adjustedQuantity * buyPrice;
+    const grossProfit = revenue - purchaseCost;
+    const totalCosts = transportCost + operatingCost + interestCost + spoilageLoss + slippageCost + stalePriceDiscount;
+    const netProfit = grossProfit - totalCosts;
+    const netMargin = purchaseCost > 0 ? netProfit / purchaseCost : 0;
+
+    // =========================================================================
+    // Determine if profitable
+    // =========================================================================
+    const isProfitable = netMargin >= this.config.minProfitMargin && adjustedQuantity > 0;
 
     return {
-      profitable: netMargin >= this.config.minProfitMargin,
+      profitable: isProfitable,
       netMargin,
-      transportCost: transport.totalRoundTrip,
+      transportCost,
+      operatingCost,
+      interestCost,
+      spoilageLoss,
+      slippageCost,
+      stalePriceDiscount,
+      treasuryLimited,
+      adjustedQuantity,
     };
   }
 

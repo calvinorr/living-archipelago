@@ -26,6 +26,20 @@ import { updateCrew, type CrewUpdateResult } from '../systems/crew.js';
 import { updateAllShipyards } from '../systems/shipyard.js';
 import { updateBuildingMaintenance } from '../systems/buildings.js';
 import { applyStorageSpoilage } from '../systems/storage.js';
+import { processOperatingCosts, type OperatingCostsResult } from '../systems/operating-costs.js';
+import { processCreditSystem, type CreditResult } from '../systems/credit.js';
+import { regenerateDepth } from '../systems/market-depth.js';
+import { processSupplyShocks, type SupplyShockResult } from '../systems/supply-shocks.js';
+
+/**
+ * Supply shock event for metrics
+ */
+export interface SupplyShockEvent {
+  islandId: string;
+  goodId: GoodId;
+  type: 'boom' | 'bust';
+  multiplier: number;
+}
 
 /**
  * Tick metrics for logging/debugging
@@ -40,8 +54,14 @@ export interface TickMetrics {
   newEvents: string[];
   expiredEvents: string[];
   crewUpdates: Map<string, CrewUpdateResult>;
+  operatingCosts: Map<string, OperatingCostsResult>;
+  creditActivity: Map<string, CreditResult>;
   shipyardCompletions: Array<{ shipyardId: ShipyardId; shipId: ShipId; shipName: string }>;
   fishMigration: FishMigrationResult;
+  /** New supply shocks triggered this tick */
+  supplyShocksTriggered: SupplyShockEvent[];
+  /** Supply shocks that expired this tick */
+  supplyShocksExpired: SupplyShockEvent[];
 }
 
 /**
@@ -150,8 +170,12 @@ export class Simulation {
       newEvents: [],
       expiredEvents: [],
       crewUpdates: new Map(),
+      operatingCosts: new Map(),
+      creditActivity: new Map(),
       shipyardCompletions: [],
       fishMigration: { migrations: [], totalMigrated: 0 },
+      supplyShocksTriggered: [],
+      supplyShocksExpired: [],
     };
 
     // Clone state for immutable update
@@ -162,6 +186,7 @@ export class Simulation {
     // Reset per-tick economy metrics
     if (next.economyMetrics) {
       next.economyMetrics.taxCollectedThisTick = 0;
+      next.economyMetrics.taxRedistributedThisTick = 0;
     }
 
     // =========================================================================
@@ -179,25 +204,84 @@ export class Simulation {
     next.events = updateEvents(next.events, newEvents, next.tick);
 
     // =========================================================================
+    // 1.5. Supply Shocks Processing (Economic Model V2)
+    // Process supply shocks before production - check for new/expired shocks
+    // =========================================================================
+    const goodIds = Array.from(next.goods.keys());
+    for (const [islandId, island] of next.islands) {
+      const shockResult: SupplyShockResult = processSupplyShocks(
+        island,
+        () => this.rng.random(),
+        next.tick,
+        this.config.supplyVolatilityConfig,
+        goodIds
+      );
+
+      // Update island with new shock state
+      next.islands.set(islandId, shockResult.newIsland);
+
+      // Track new shocks for metrics
+      for (const shock of shockResult.shocksTriggered) {
+        metrics.supplyShocksTriggered.push({
+          islandId,
+          goodId: shock.goodId,
+          type: shock.type,
+          multiplier: shock.multiplier,
+        });
+      }
+
+      // Track expired shocks for metrics
+      for (const shock of shockResult.shocksExpired) {
+        metrics.supplyShocksExpired.push({
+          islandId,
+          goodId: shock.goodId,
+          type: shock.type,
+          multiplier: shock.type === 'boom' ? this.config.supplyVolatilityConfig.boomMultiplier : this.config.supplyVolatilityConfig.bustMultiplier,
+        });
+      }
+    }
+
+    // =========================================================================
     // 2-6. Update each island
     // =========================================================================
     for (const [islandId, island] of next.islands) {
       // 2. Production (now runs first to determine harvest - Track 03)
-      const goodIds = Array.from(next.goods.keys());
+      // Updated for Economic Model V2: passes current tick and RNG for supply shocks and variance
       const productionResult: ProductionResult = updateProduction(
         island,
         goodIds,
         this.config,
         next.events,
-        dt
+        dt,
+        next.tick,
+        () => this.rng.random()
       );
 
       // Track production
       const productionThisTick = new Map<GoodId, number>();
+      let totalProductionValue = 0;
       for (const goodId of goodIds) {
-        productionThisTick.set(goodId, productionResult.produced.get(goodId) ?? 0);
+        const produced = productionResult.produced.get(goodId) ?? 0;
+        productionThisTick.set(goodId, produced);
+        // Calculate production value for treasury (internal economy)
+        if (this.config.islandEconomyConfig?.enabled && produced > 0) {
+          totalProductionValue += produced * this.config.islandEconomyConfig.productionValueRate;
+        }
       }
       metrics.production.set(islandId, productionThisTick);
+
+      // Add production value to island treasury (represents internal economic activity)
+      // This gives islands purchasing power to buy imports
+      if (totalProductionValue > 0) {
+        const currentIsland = next.islands.get(islandId);
+        if (currentIsland) {
+          next.islands.set(islandId, {
+            ...currentIsland,
+            treasury: currentIsland.treasury + totalProductionValue,
+            treasuryIncome: currentIsland.treasuryIncome + totalProductionValue,
+          });
+        }
+      }
 
       // 3. Ecology regeneration (now uses harvest from production - Track 03)
       const harvestData: HarvestData = {
@@ -263,9 +347,18 @@ export class Simulation {
         dt
       );
 
+      // 6.1 Market depth regeneration (Economic Model V2)
+      // Depth gradually recovers toward ideal levels, allowing markets to handle sustained trade
+      const marketWithDepth = regenerateDepth(
+        newMarket,
+        newMarket.idealStock,
+        this.config.marketDepthConfig,
+        dt
+      );
+
       // Track price changes
       const priceChanges = new Map<GoodId, number>();
-      for (const [goodId, newPrice] of newMarket.prices) {
+      for (const [goodId, newPrice] of marketWithDepth.prices) {
         const oldPrice = island.market.prices.get(goodId) ?? newPrice;
         priceChanges.set(goodId, newPrice - oldPrice);
       }
@@ -277,7 +370,7 @@ export class Simulation {
         ecosystem: newEcosystem,
         population: newPopulation,
         inventory: consumptionResult.newInventory,
-        market: newMarket,
+        market: marketWithDepth,
       });
     }
 
@@ -306,7 +399,8 @@ export class Simulation {
         next.goods,
         next.events,
         dt,
-        this.config
+        this.config,
+        next.tick // Pass current tick for price discovery lag
       );
 
       if (arrived && arrivedAt) {
@@ -336,6 +430,30 @@ export class Simulation {
       if (crewResult.newIsland && ship.location.kind === 'at_island') {
         next.islands.set(ship.location.islandId, crewResult.newIsland);
       }
+    }
+
+    // =========================================================================
+    // 10.5. Operating costs - crew wages, maintenance, port fees
+    // =========================================================================
+    for (const [shipId, ship] of next.ships) {
+      const isDockedAtIsland = ship.location.kind === 'at_island';
+
+      const costResult = processOperatingCosts(ship, isDockedAtIsland, this.config, dt);
+      metrics.operatingCosts.set(shipId, costResult);
+
+      // Update ship with deducted costs
+      next.ships.set(shipId, costResult.newShip);
+    }
+
+    // =========================================================================
+    // 10.6. Credit/Debt System - interest, auto-borrow, auto-repay
+    // =========================================================================
+    for (const [shipId, ship] of next.ships) {
+      const creditResult = processCreditSystem(ship, this.config, dt);
+      metrics.creditActivity.set(shipId, creditResult);
+
+      // Update ship with new credit state
+      next.ships.set(shipId, creditResult.newShip);
     }
 
     // =========================================================================
@@ -370,6 +488,56 @@ export class Simulation {
       }
     }
     metrics.shipyardCompletions = shipyardResult.completions;
+
+    // =========================================================================
+    // 11.5. Tax Redistribution - redistribute portion of collected tax to islands
+    // =========================================================================
+    if (next.economyMetrics && this.config.islandEconomyConfig?.enabled) {
+      const taxCollected = next.economyMetrics.taxCollectedThisTick;
+      const redistributionRate = this.config.islandEconomyConfig.taxRedistributionRate;
+      const redistributableAmount = taxCollected * redistributionRate;
+
+      if (redistributableAmount > 0) {
+        // Calculate total population across all islands
+        let totalPopulation = 0;
+        for (const island of next.islands.values()) {
+          totalPopulation += island.population.size;
+        }
+
+        if (totalPopulation > 0) {
+          // Distribute proportionally by population
+          let totalRedistributed = 0;
+          let updatedCount = 0;
+
+          for (const [islandId, island] of next.islands) {
+            const populationShare = island.population.size / totalPopulation;
+            const islandShare = redistributableAmount * populationShare;
+
+            // Update island treasury
+            const updatedIsland = {
+              ...island,
+              treasury: island.treasury + islandShare,
+              treasuryIncome: island.treasuryIncome + islandShare,
+            };
+            next.islands.set(islandId, updatedIsland);
+
+            totalRedistributed += islandShare;
+            updatedCount++;
+          }
+
+          // Update economy metrics
+          next.economyMetrics.taxRedistributedThisTick = totalRedistributed;
+          next.economyMetrics.totalTaxRedistributed += totalRedistributed;
+
+          // Log redistribution for debugging
+          if (totalRedistributed > 0.01) {
+            console.log(
+              `[TaxRedistribution] Redistributed ${totalRedistributed.toFixed(2)} coins to ${updatedCount} islands (${(redistributionRate * 100).toFixed(0)}% of ${taxCollected.toFixed(2)} collected)`
+            );
+          }
+        }
+      }
+    }
 
     // =========================================================================
     // 12. Update RNG state and compute hash

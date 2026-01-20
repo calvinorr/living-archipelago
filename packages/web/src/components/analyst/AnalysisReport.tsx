@@ -33,27 +33,36 @@ function SeverityBadge({ severity }: { severity: 'critical' | 'warning' | 'info'
 }
 
 export function AnalysisReport() {
-  const { analysis, runData, selectedRunId, isAnalyzing, analyzeRun } = useAnalyst();
+  const { analysis, runData, selectedRunId, isAnalyzing } = useAnalyst();
 
   if (!selectedRunId) {
     return (
-      <div className="bg-card border rounded-lg p-6 text-center text-muted-foreground">
+      <div className="bg-card border rounded-lg p-6 text-center text-muted-foreground h-full flex items-center justify-center">
         Select a run to view analysis
+      </div>
+    );
+  }
+
+  if (isAnalyzing) {
+    return (
+      <div className="bg-card border rounded-lg p-6 h-full flex flex-col items-center justify-center gap-3">
+        <div className="w-8 h-8 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+        <span className="text-sm text-muted-foreground">Analyzing run data...</span>
       </div>
     );
   }
 
   if (!runData && !analysis) {
     return (
-      <div className="bg-card border rounded-lg p-6 text-center text-muted-foreground">
+      <div className="bg-card border rounded-lg p-6 text-center text-muted-foreground h-full flex items-center justify-center">
         Loading run data...
       </div>
     );
   }
 
   return (
-    <div className="bg-card border rounded-lg p-4 space-y-4">
-      <div className="flex justify-between items-start">
+    <div className="bg-card border rounded-lg p-4 flex flex-col h-full">
+      <div className="flex justify-between items-start mb-4 flex-shrink-0">
         <div>
           <h3 className="text-sm font-medium text-muted-foreground uppercase tracking-wider">
             Analysis Results
@@ -64,18 +73,10 @@ export function AnalysisReport() {
             </div>
           )}
         </div>
-
-        <button
-          onClick={() => analyzeRun(selectedRunId)}
-          disabled={isAnalyzing}
-          className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-md hover:bg-primary/90 disabled:opacity-50"
-        >
-          {isAnalyzing ? 'Analyzing...' : analysis ? 'Re-Analyze' : 'Analyze Run'}
-        </button>
       </div>
 
       {analysis ? (
-        <>
+        <div className="flex-1 overflow-y-auto min-h-0 space-y-4">
           {/* Health Score */}
           <div className="flex items-center gap-6 p-4 bg-muted/30 rounded-lg">
             <HealthScoreCircle score={analysis.healthScore} />
@@ -87,7 +88,7 @@ export function AnalysisReport() {
             <h4 className="text-sm font-medium mb-2">
               Issues ({analysis.issues.length})
             </h4>
-            <div className="space-y-2 max-h-[200px] overflow-y-auto">
+            <div className="space-y-2">
               {analysis.issues.map((issue, idx) => (
                 <div
                   key={idx}
@@ -116,10 +117,10 @@ export function AnalysisReport() {
               )}
             </div>
           </div>
-        </>
+        </div>
       ) : runData ? (
         /* Quick Summary without AI analysis */
-        <div className="space-y-3">
+        <div className="flex-1 space-y-3">
           <div className="grid grid-cols-2 gap-3">
             <div className="p-3 bg-muted/20 rounded-md">
               <div className="text-xs text-muted-foreground">Duration</div>

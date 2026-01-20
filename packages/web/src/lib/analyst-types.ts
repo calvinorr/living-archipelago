@@ -127,7 +127,7 @@ export interface Improvement {
   suggestedValue?: unknown;
   filePath?: string;
   diff?: string;
-  status: 'pending' | 'applied' | 'rejected';
+  status: 'pending' | 'applying' | 'applied' | 'rejected';
   appliedAt?: string;
   confidence: number;
 }

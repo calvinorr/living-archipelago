@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "lastModified": "2026-01-20T18:41:10.210Z",
+  "overrides": [
+    {
+      "path": "foodPriceElasticity",
+      "oldValue": -0.3,
+      "newValue": -0.5,
+      "source": "analyst-run-21",
+      "appliedAt": "2026-01-20T08:35:10.545Z"
+    },
+    {
+      "path": "maxGrowthRate",
+      "oldValue": 0.003,
+      "newValue": 0.01,
+      "source": "analyst-run-33",
+      "appliedAt": "2026-01-20T16:31:37.976Z"
+    },
+    {
+      "path": "healthyThreshold",
+      "oldValue": 0.9,
+      "newValue": 0.8,
+      "source": "analyst-run-34",
+      "appliedAt": "2026-01-20T16:33:07.658Z"
+    },
+    {
+      "path": "priceLambda",
+      "oldValue": 0.2,
+      "newValue": 0.4,
+      "source": "analyst-run-35",
+      "appliedAt": "2026-01-20T16:34:48.044Z"
+    },
+    {
+      "path": "transactionTaxRate",
+      "oldValue": 0.001,
+      "newValue": 0.02,
+      "source": "analyst-run-42",
+      "appliedAt": "2026-01-20T18:40:00.117Z"
+    },
+    {
+      "path": "priceGamma",
+      "oldValue": 2.5,
+      "newValue": 2.5,
+      "source": "analyst-run-43",
+      "appliedAt": "2026-01-20T18:41:05.572Z"
+    },
+    {
+      "path": "priceVelocityK",
+      "oldValue": 0.01,
+      "newValue": 0.02,
+      "source": "analyst-run-43",
+      "appliedAt": "2026-01-20T18:41:08.284Z"
+    },
+    {
+      "path": "Fish Regen Rate",
+      "oldValue": 0.04,
+      "newValue": 0.035,
+      "source": "analyst-run-43",
+      "appliedAt": "2026-01-20T18:41:08.964Z"
+    },
+    {
+      "path": "baseVoyageCost",
+      "oldValue": 15,
+      "newValue": 25,
+      "source": "analyst-run-43",
+      "appliedAt": "2026-01-20T18:41:10.210Z"
+    }
+  ]
+}

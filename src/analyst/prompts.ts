@@ -105,6 +105,49 @@ ${data.summary.anomalies.length > 0
 - Transaction Tax: ${(data.summary.config.transactionTaxRate * 100).toFixed(1)}%
 - Base Voyage Cost: ${data.summary.config.baseVoyageCost}
 
+### VALID CONFIG PATHS (use EXACTLY these paths - no prefixes like "Market." or "Transport."):
+**Market:**
+- priceGamma (inventory pressure exponent, default ~1.5)
+- priceVelocityK (velocity coefficient, default ~0.05)
+- priceLambda (EMA smoothing factor, default ~0.2)
+- minPrice (minimum price floor, default 0.1)
+- maxPrice (maximum price ceiling, default 200)
+- transactionTaxRate (trade tax, default 0.04)
+
+**Population:**
+- foodPerCapita (food units needed per person, default 0.1)
+- healthPenaltyRate (health decline rate, default 0.05)
+- populationDeclineThreshold (health threshold for decline, default 0.3)
+- maxGrowthRate (max annual growth, default 0.002)
+- maxDeclineRate (max annual decline, default 0.02)
+- stableHealthThreshold (health for zero growth, default 0.5)
+- optimalHealthThreshold (health for max growth, default 0.9)
+- crisisHealthThreshold (health for max decline, default 0.3)
+
+**Consumption:**
+- foodPriceElasticity (food demand elasticity, default -0.3)
+- luxuryPriceElasticity (luxury demand elasticity, default -1.2)
+- foodSubstitutionElasticity (fish/grain substitution, default 0.5)
+- healthConsumptionFactor (health impact on consumption, default 0.3)
+
+**Production:**
+- labourAlpha (labor productivity, default 0.7)
+- toolBeta (tool productivity bonus, default 0.3)
+- collapseThreshold (ecosystem collapse ratio, default 0.1)
+- collapseFloor (minimum yield in collapse, default 0.05)
+- harvestEfficiency (harvest to product ratio, default 1.0)
+
+**Ecosystem:**
+- healthyThreshold (ratio for full productivity, default 0.6)
+- deadThreshold (ratio for ecosystem death, default 0.02)
+- impairedRecoveryMultiplier (recovery when degraded, default 0.5)
+- collapsedRecoveryMultiplier (recovery when collapsed, default 0.1)
+
+**Transport:**
+- baseVoyageCost (fixed voyage cost, default 10)
+- costPerDistanceUnit (per-distance cost, default 0.1)
+- perVolumeHandlingCost (per-cargo cost, default 0.05)
+
 ---
 
 Please analyze this simulation run and provide:
@@ -130,7 +173,7 @@ Format your response as JSON:
     {
       "type": "config",
       "title": "string",
-      "configPath": "string",
+      "configPath": "priceGamma",  // MUST be exact path from VALID CONFIG PATHS list above (e.g. "priceGamma", "maxGrowthRate", NOT "Market.priceGamma")
       "currentValue": any,
       "suggestedValue": any,
       "rationale": "string",

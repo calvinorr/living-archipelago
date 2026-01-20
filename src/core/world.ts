@@ -27,6 +27,12 @@ import type {
   Building,
   FishMigrationConfig,
   ShippingCostConfig,
+  IslandEconomyConfig,
+  OperatingCostsConfig,
+  CreditConfig,
+  MarketDepthConfig,
+  SupplyVolatilityConfig,
+  ProductionShock,
 } from './types.js';
 import { createShipyard } from '../systems/shipyard.js';
 
@@ -112,6 +118,117 @@ export const DEFAULT_BUILDINGS_CONFIG: BuildingsConfig = {
   },
   conditionDecayRate: 0.001,
   levelEffectMultiplier: 0.5,
+};
+
+/**
+ * Default island economy configuration (Economic Model V2)
+ * Controls how islands manage treasury and purchasing power
+ */
+export const DEFAULT_ISLAND_ECONOMY_CONFIG: IslandEconomyConfig = {
+  enabled: true, // Enable island treasury system
+  baseTreasuryPerPop: 10, // 10 coins per population for initial treasury
+  importBudgetRatio: 0.1, // Can spend 10% of treasury per tick on imports
+  minTreasuryRatio: 0.2, // Keep 20% as emergency reserve
+  taxRedistributionRate: 0.5, // 50% of tax goes back to islands
+  productionValueRate: 0.5, // Each unit produced adds 0.5 to treasury (internal value)
+};
+
+/**
+ * Default operating costs configuration (Economic Model V2)
+ * Creates realistic cost pressure on traders
+ *
+ * Design goals:
+ * - Operating costs should be ~5-10% of typical trade profits
+ * - Ships should not go bankrupt immediately but feel pressure from idle time
+ * - Costs scale with ship size (capacity) to encourage efficient fleet management
+ *
+ * Example calculation for a ship with capacity 100, crew 10 at 0.5 wage rate:
+ * - Crew wages: 10 * 0.5 * 1.0 = 5 coins/tick
+ * - Maintenance: 100 * 0.01 = 1 coin/tick
+ * - Port fee: 1 coin/tick (when docked)
+ * - Total at sea: 6 coins/tick, docked: 7 coins/tick
+ * - Daily cost (24 ticks): 144-168 coins
+ */
+export const DEFAULT_OPERATING_COSTS_CONFIG: OperatingCostsConfig = {
+  crewWageMultiplier: 1.0, // Normal wages (uses crew.wageRate which is 0.5 by default)
+  maintenanceRate: 0.01, // 1 coin per 100 capacity per tick
+  portFeePerTick: 1.0, // 1 coin per tick when docked
+  unpaidWagesMoraleThreshold: 24, // 1 day without pay before morale drops
+};
+
+/**
+ * Default credit/debt configuration (Economic Model V2)
+ * Allows ships to borrow funds when cash runs low
+ *
+ * Design goals:
+ * - Prevent ships from being completely stuck without funds
+ * - Create financial management pressure through interest
+ * - Ships with excessive debt lose access to more credit
+ *
+ * Example calculation for a ship with capacity 100:
+ * - Ship value: 100 * 10 = 1000 coins
+ * - Credit limit: 1000 * 2.0 = 2000 coins
+ * - Max debt before cut-off: 1000 * 0.8 = 800 coins
+ * - Daily interest on 500 debt: 500 * 0.001 * 24 = 12 coins
+ */
+export const DEFAULT_CREDIT_CONFIG: CreditConfig = {
+  baseCreditMultiplier: 2.0, // Can borrow up to 2x ship value
+  interestRatePerTick: 0.001, // 0.1% per tick (~2.4% daily)
+  minCashThreshold: 50, // Auto-borrow when cash below 50
+  maxDebtRatio: 0.8, // Credit cut off at 80% of ship value
+  baseValuePerCapacity: 10, // Each capacity unit worth 10 coins for credit calculation
+};
+
+/**
+ * Default market depth configuration (Economic Model V2)
+ * Controls price impact and liquidity for large trades
+ *
+ * Design goals:
+ * - Large trades should get worse prices (slippage)
+ * - Prevents instant arbitrage of price differences
+ * - Markets recover liquidity over time
+ * - Small trades have minimal impact
+ *
+ * Example with idealStock=100, baseDepthMultiplier=0.5:
+ * - Target depth: 50 units
+ * - Trading 10 units (20% of depth): ~2% price impact
+ * - Trading 50 units (100% of depth): ~10% price impact
+ * - Trading 100 units (200% of depth): ~30% price impact (quadratic penalty)
+ */
+export const DEFAULT_MARKET_DEPTH_CONFIG: MarketDepthConfig = {
+  baseDepthMultiplier: 0.5, // Depth = 50% of ideal stock
+  priceImpactCoefficient: 0.1, // 10% max impact when consuming full depth
+  minDepth: 10, // Always have at least 10 units of depth
+  depthRecoveryRate: 0.1, // Recover 10% of missing depth per tick
+};
+
+/**
+ * Default supply volatility configuration (Economic Model V2)
+ * Controls production variance and supply shocks
+ *
+ * Design goals:
+ * - Random variance makes each playthrough slightly different
+ * - Shocks create trading opportunities (buy from boom islands, avoid bust islands)
+ * - Bust chance slightly higher than boom = slight deflationary pressure
+ * - Shocks are temporary - economy self-corrects
+ * - All randomness uses seeded RNG for determinism
+ *
+ * Example with baseVariance=0.1:
+ * - Production varies from 0.9x to 1.1x randomly each tick
+ * - Adds natural fluctuation to prices without destabilizing the economy
+ *
+ * Example with boomChance=0.001, bustChance=0.002:
+ * - Each good on each island has ~0.1% chance of boom per tick
+ * - Each good on each island has ~0.2% chance of bust per tick
+ * - With 5 goods and 3 islands, expect ~0.4 booms and ~0.7 busts per day (24 ticks)
+ */
+export const DEFAULT_SUPPLY_VOLATILITY_CONFIG: SupplyVolatilityConfig = {
+  baseVariance: 0.1, // +/-10% random variance on production
+  boomChance: 0.001, // 0.1% chance of boom per tick per island per good
+  bustChance: 0.002, // 0.2% chance of bust per tick per island per good
+  boomMultiplier: 1.5, // 50% production increase during boom
+  bustMultiplier: 0.5, // 50% production decrease during bust
+  shockDuration: 24, // Shocks last 24 ticks (1 day)
 };
 
 /**
@@ -245,8 +362,23 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   // Fish Migration System
   fishMigrationConfig: DEFAULT_FISH_MIGRATION_CONFIG,
 
+  // Operating Costs System (Economic Model V2)
+  operatingCostsConfig: DEFAULT_OPERATING_COSTS_CONFIG,
+
+  // Credit/Debt System (Economic Model V2)
+  creditConfig: DEFAULT_CREDIT_CONFIG,
+
   // Transaction Tax (currency sink)
   transactionTaxRate: 0.04, // 4% tax on all trades
+
+  // Island Economy System (Economic Model V2)
+  islandEconomyConfig: DEFAULT_ISLAND_ECONOMY_CONFIG,
+
+  // Market Depth System (Economic Model V2)
+  marketDepthConfig: DEFAULT_MARKET_DEPTH_CONFIG,
+
+  // Supply Volatility System (Economic Model V2)
+  supplyVolatilityConfig: DEFAULT_SUPPLY_VOLATILITY_CONFIG,
 };
 
 /**
@@ -304,42 +436,50 @@ export function createGoodsMap(goods: GoodDefinition[]): Map<GoodId, GoodDefinit
 
 /**
  * Create initial inventory for an island
+ *
+ * DESIGN: Start with ~1-2 days of food buffer to force reliance on production.
+ * This creates a real economy where:
+ * - Islands that don't produce food will run out and need imports
+ * - Arbitrage opportunities are temporary and based on actual scarcity
+ * - Traders provide real value by moving goods from surplus to deficit areas
+ *
+ * Consumption formula: population * 0.06/hour * 24 hours ≈ 1.44 * population per day
  */
 function createInitialInventory(
   archetype: 'fishing' | 'agricultural' | 'forest'
 ): Map<GoodId, number> {
   const inventory = new Map<GoodId, number>();
 
-  // Calculate ~7 days of food buffer for trade establishment
-  // Consumption: population * 0.06/hour * 24 hours ≈ 1.44 * population per day
   switch (archetype) {
     case 'fishing':
-      // Population 500: needs ~720/day, 7 days = 5040 total food
-      // Fishing islands produce fish, need grain imports
-      inventory.set('fish', 3000); // Can produce locally
-      inventory.set('grain', 2500); // Needs import - large buffer
-      inventory.set('timber', 50);
-      inventory.set('tools', 40);
-      inventory.set('luxuries', 20);
+      // Population 500: needs ~720 food/day
+      // Start with ~1.5 days buffer = ~1080 food total
+      // Fishing island produces fish locally, needs grain imports
+      inventory.set('fish', 800);   // ~1 day of local production surplus
+      inventory.set('grain', 300);  // ~0.5 day - creates import demand
+      inventory.set('timber', 30);
+      inventory.set('tools', 25);
+      inventory.set('luxuries', 10);
       break;
     case 'agricultural':
-      // Population 600: needs ~864/day, 7 days = 6048 total food
-      // Agricultural islands are self-sufficient but export-focused
-      inventory.set('fish', 1500);
-      inventory.set('grain', 5000); // Main producer
-      inventory.set('timber', 100);
-      inventory.set('tools', 60);
-      inventory.set('luxuries', 30);
+      // Population 600: needs ~864 food/day
+      // Start with ~1.5 days buffer = ~1300 food total
+      // Agricultural island has grain surplus, needs fish imports
+      inventory.set('fish', 200);   // ~0.25 day - creates import demand
+      inventory.set('grain', 1000); // ~1 day of local production surplus
+      inventory.set('timber', 60);
+      inventory.set('tools', 35);
+      inventory.set('luxuries', 15);
       break;
     case 'forest':
-      // Population 450: needs ~648/day
-      // Forest islands start with MINIMAL food - high prices signal urgent need for imports
-      // Trade routes should immediately prioritize food delivery here
-      inventory.set('fish', 50);   // Very low - creates high price signal
-      inventory.set('grain', 50);  // Very low - creates high price signal
-      inventory.set('timber', 800);
-      inventory.set('tools', 50);
-      inventory.set('luxuries', 20);
+      // Population 450: needs ~648 food/day
+      // Start with ~0.75 day buffer = ~500 food total
+      // Forest island is food-poor, creates strong import demand
+      inventory.set('fish', 200);   // ~0.3 day - urgent need
+      inventory.set('grain', 250);  // ~0.4 day - urgent need
+      inventory.set('timber', 400); // Main export good - reduced from 800
+      inventory.set('tools', 30);
+      inventory.set('luxuries', 10);
       break;
   }
 
@@ -357,6 +497,8 @@ function createInitialMarket(
   const idealStock = new Map<GoodId, number>();
   const momentum = new Map<GoodId, number>();
   const consumptionVelocity = new Map<GoodId, number>();
+  const buyDepth = new Map<GoodId, number>();
+  const sellDepth = new Map<GoodId, number>();
 
   for (const good of goods) {
     prices.set(good.id, good.basePrice);
@@ -382,13 +524,36 @@ function createInitialMarket(
         break;
     }
     idealStock.set(good.id, ideal);
+
+    // Initialize market depth based on ideal stock
+    // Depth = idealStock * baseDepthMultiplier (from DEFAULT_MARKET_DEPTH_CONFIG)
+    const depth = Math.max(
+      DEFAULT_MARKET_DEPTH_CONFIG.minDepth,
+      ideal * DEFAULT_MARKET_DEPTH_CONFIG.baseDepthMultiplier
+    );
+    buyDepth.set(good.id, depth);
+    sellDepth.set(good.id, depth);
   }
 
-  return { prices, idealStock, momentum, consumptionVelocity };
+  return { prices, idealStock, momentum, consumptionVelocity, buyDepth, sellDepth };
 }
 
 /**
  * Create production params for an archetype
+ *
+ * DESIGN: Production rates are calibrated so that:
+ * - Specialized islands produce ~80-100% of their local consumption in their specialty
+ * - Non-specialty production covers ~20-30% of needs
+ * - Trade is REQUIRED to achieve food security (no island is fully self-sufficient)
+ * - At equilibrium, total archipelago production should slightly exceed consumption
+ *
+ * Consumption formula: population * 0.06/hour
+ * - Shoalhold (500 pop): 30 food/hr
+ * - Greenbarrow (600 pop): 36 food/hr
+ * - Timberwake (450 pop): 27 food/hr
+ * Total: 93 food/hr across archipelago
+ *
+ * Target production: ~100-110 food/hr total (slight surplus for trade buffer)
  */
 function createProductionParams(
   archetype: 'fishing' | 'agricultural' | 'forest'
@@ -397,30 +562,40 @@ function createProductionParams(
   const toolSensitivity = new Map<GoodId, number>();
   const ecosystemSensitivity = new Map<GoodId, number>();
 
-  // Production rates reduced ~35% from original to create tighter economy
   switch (archetype) {
     case 'fishing':
-      baseRate.set('fish', 10);  // Was 15
-      baseRate.set('grain', 1.5);
-      baseRate.set('timber', 2);
-      baseRate.set('tools', 0.7);
-      baseRate.set('luxuries', 0.3);
+      // Shoalhold needs 30 food/hr
+      // Fish production: 25/hr (83% of needs) - main export
+      // Grain production: 3/hr (10% of needs) - must import
+      // Total local: 28/hr - slight deficit requires grain imports
+      baseRate.set('fish', 25);   // Main specialty - can export surplus
+      baseRate.set('grain', 3);   // Minimal local farming
+      baseRate.set('timber', 1);  // Very limited forestry
+      baseRate.set('tools', 0.5);
+      baseRate.set('luxuries', 0.2);
       break;
     case 'agricultural':
-      baseRate.set('fish', 1.5);
-      baseRate.set('grain', 12);  // Was 18
-      baseRate.set('timber', 2.5);
-      baseRate.set('tools', 1.3);
-      baseRate.set('luxuries', 0.7);
+      // Greenbarrow needs 36 food/hr
+      // Grain production: 32/hr (89% of needs) - main export
+      // Fish production: 3/hr (8% of needs) - must import
+      // Total local: 35/hr - slight deficit requires fish imports
+      baseRate.set('fish', 3);    // Minimal coastal fishing
+      baseRate.set('grain', 32);  // Main specialty - can export surplus
+      baseRate.set('timber', 2);  // Some forestry
+      baseRate.set('tools', 1.0);
+      baseRate.set('luxuries', 0.5);
       break;
     case 'forest':
-      // Forest islands need substantial local food production
-      // Pop 450 * 0.06/hour = 27 food/hour consumption
-      // Need ~20 food/hour local + trade to survive
-      baseRate.set('fish', 8);    // Significant coastal fishing
-      baseRate.set('grain', 12);  // Substantial subsistence farming
-      baseRate.set('timber', 10); // Still main export
-      baseRate.set('tools', 2);
+      // Timberwake needs 27 food/hr
+      // Forest islands have poor food production - MUST rely on trade
+      // Fish production: 8/hr (30% of needs)
+      // Grain production: 6/hr (22% of needs)
+      // Total local: 14/hr - significant deficit, ~52% covered
+      // Must import ~13 food/hr to survive
+      baseRate.set('fish', 8);    // Some coastal fishing
+      baseRate.set('grain', 6);   // Subsistence farming in clearings
+      baseRate.set('timber', 15); // Main specialty - high export potential
+      baseRate.set('tools', 1.5); // Good tool production from wood
       baseRate.set('luxuries', 0.3);
       break;
   }
@@ -456,7 +631,7 @@ function createLabourAllocation(
 export function createMVPIslands(goods: GoodDefinition[]): Map<IslandId, IslandState> {
   const islands = new Map<IslandId, IslandState>();
 
-  // Shoalhold - Fishing Isle
+  // Shoalhold - Fishing Isle (pop: 500, treasury: 5000)
   islands.set('shoalhold', {
     id: 'shoalhold',
     name: 'Shoalhold',
@@ -483,9 +658,17 @@ export function createMVPIslands(goods: GoodDefinition[]): Map<IslandId, IslandS
     market: createInitialMarket(goods, 'fishing'),
     productionParams: createProductionParams('fishing'),
     buildings: new Map<BuildingId, Building>(),
+    // Economic Model V2: Treasury initialized at 10 coins per population
+    treasury: 5000,
+    treasuryIncome: 0,
+    treasuryExpenses: 0,
+    cumulativeExportRevenue: 0,
+    cumulativeImportCosts: 0,
+    // Economic Model V2: Supply Volatility - Production Shocks
+    productionShocks: new Map<GoodId, ProductionShock>(),
   });
 
-  // Greenbarrow - Agricultural Isle
+  // Greenbarrow - Agricultural Isle (pop: 600, treasury: 6000)
   islands.set('greenbarrow', {
     id: 'greenbarrow',
     name: 'Greenbarrow',
@@ -512,9 +695,17 @@ export function createMVPIslands(goods: GoodDefinition[]): Map<IslandId, IslandS
     market: createInitialMarket(goods, 'agricultural'),
     productionParams: createProductionParams('agricultural'),
     buildings: new Map<BuildingId, Building>(),
+    // Economic Model V2: Treasury initialized at 10 coins per population
+    treasury: 6000,
+    treasuryIncome: 0,
+    treasuryExpenses: 0,
+    cumulativeExportRevenue: 0,
+    cumulativeImportCosts: 0,
+    // Economic Model V2: Supply Volatility - Production Shocks
+    productionShocks: new Map<GoodId, ProductionShock>(),
   });
 
-  // Timberwake - Forest Isle
+  // Timberwake - Forest Isle (pop: 450, treasury: 4500)
   islands.set('timberwake', {
     id: 'timberwake',
     name: 'Timberwake',
@@ -541,6 +732,14 @@ export function createMVPIslands(goods: GoodDefinition[]): Map<IslandId, IslandS
     market: createInitialMarket(goods, 'forest'),
     productionParams: createProductionParams('forest'),
     buildings: new Map<BuildingId, Building>(),
+    // Economic Model V2: Treasury initialized at 10 coins per population
+    treasury: 4500,
+    treasuryIncome: 0,
+    treasuryExpenses: 0,
+    cumulativeExportRevenue: 0,
+    cumulativeImportCosts: 0,
+    // Economic Model V2: Supply Volatility - Production Shocks
+    productionShocks: new Map<GoodId, ProductionShock>(),
   });
 
   return islands;
@@ -581,6 +780,14 @@ export function createMVPShips(): Map<ShipId, ShipState> {
     crew: createDefaultCrew(100),
     condition: 1.0,
     totalDistanceTraveled: 0,
+    spoilageLossThisVoyage: new Map(),
+    cumulativeSpoilageLoss: 0,
+    lastKnownPrices: new Map(), // Price Discovery Lag: starts with no price knowledge
+    // Credit/Debt System (Economic Model V2)
+    debt: 0,
+    creditLimit: 100 * DEFAULT_CREDIT_CONFIG.baseValuePerCapacity * DEFAULT_CREDIT_CONFIG.baseCreditMultiplier, // 2000
+    interestRate: DEFAULT_CREDIT_CONFIG.interestRatePerTick,
+    cumulativeInterestPaid: 0,
   });
 
   // Ship 2: Greenbarrow to Timberwake grain route
@@ -597,6 +804,14 @@ export function createMVPShips(): Map<ShipId, ShipState> {
     crew: createDefaultCrew(80),
     condition: 1.0,
     totalDistanceTraveled: 0,
+    spoilageLossThisVoyage: new Map(),
+    cumulativeSpoilageLoss: 0,
+    lastKnownPrices: new Map(), // Price Discovery Lag: starts with no price knowledge
+    // Credit/Debt System (Economic Model V2)
+    debt: 0,
+    creditLimit: 80 * DEFAULT_CREDIT_CONFIG.baseValuePerCapacity * DEFAULT_CREDIT_CONFIG.baseCreditMultiplier, // 1600
+    interestRate: DEFAULT_CREDIT_CONFIG.interestRatePerTick,
+    cumulativeInterestPaid: 0,
   });
 
   // Ship 3: Shoalhold to Timberwake fish route
@@ -613,6 +828,14 @@ export function createMVPShips(): Map<ShipId, ShipState> {
     crew: createDefaultCrew(90),
     condition: 1.0,
     totalDistanceTraveled: 0,
+    spoilageLossThisVoyage: new Map(),
+    cumulativeSpoilageLoss: 0,
+    lastKnownPrices: new Map(), // Price Discovery Lag: starts with no price knowledge
+    // Credit/Debt System (Economic Model V2)
+    debt: 0,
+    creditLimit: 90 * DEFAULT_CREDIT_CONFIG.baseValuePerCapacity * DEFAULT_CREDIT_CONFIG.baseCreditMultiplier, // 1800
+    interestRate: DEFAULT_CREDIT_CONFIG.interestRatePerTick,
+    cumulativeInterestPaid: 0,
   });
 
   // Ship 4: General trade / fish to Greenbarrow
@@ -629,6 +852,14 @@ export function createMVPShips(): Map<ShipId, ShipState> {
     crew: createDefaultCrew(60),
     condition: 1.0,
     totalDistanceTraveled: 0,
+    spoilageLossThisVoyage: new Map(),
+    cumulativeSpoilageLoss: 0,
+    lastKnownPrices: new Map(), // Price Discovery Lag: starts with no price knowledge
+    // Credit/Debt System (Economic Model V2)
+    debt: 0,
+    creditLimit: 60 * DEFAULT_CREDIT_CONFIG.baseValuePerCapacity * DEFAULT_CREDIT_CONFIG.baseCreditMultiplier, // 1200
+    interestRate: DEFAULT_CREDIT_CONFIG.interestRatePerTick,
+    cumulativeInterestPaid: 0,
   });
 
   // Ship 5: Dedicated Timberwake food supplier
@@ -645,6 +876,14 @@ export function createMVPShips(): Map<ShipId, ShipState> {
     crew: createDefaultCrew(100),
     condition: 1.0,
     totalDistanceTraveled: 0,
+    spoilageLossThisVoyage: new Map(),
+    cumulativeSpoilageLoss: 0,
+    lastKnownPrices: new Map(), // Price Discovery Lag: starts with no price knowledge
+    // Credit/Debt System (Economic Model V2)
+    debt: 0,
+    creditLimit: 100 * DEFAULT_CREDIT_CONFIG.baseValuePerCapacity * DEFAULT_CREDIT_CONFIG.baseCreditMultiplier, // 2000
+    interestRate: DEFAULT_CREDIT_CONFIG.interestRatePerTick,
+    cumulativeInterestPaid: 0,
   });
 
   return ships;
@@ -726,6 +965,8 @@ export function initializeWorld(seed: number): WorldState {
     economyMetrics: {
       taxCollectedThisTick: 0,
       totalTaxCollected: 0,
+      taxRedistributedThisTick: 0,
+      totalTaxRedistributed: 0,
     },
   };
 }
@@ -763,7 +1004,7 @@ export function cloneWorldState(state: WorldState): WorldState {
     goods: new Map(state.goods),
     economyMetrics: state.economyMetrics
       ? { ...state.economyMetrics }
-      : { taxCollectedThisTick: 0, totalTaxCollected: 0 },
+      : { taxCollectedThisTick: 0, totalTaxCollected: 0, taxRedistributedThisTick: 0, totalTaxRedistributed: 0 },
   };
 }
 
@@ -783,6 +1024,8 @@ function cloneIsland(island: IslandState): IslandState {
       idealStock: new Map(island.market.idealStock),
       momentum: new Map(island.market.momentum),
       consumptionVelocity: new Map(island.market.consumptionVelocity),
+      buyDepth: new Map(island.market.buyDepth),
+      sellDepth: new Map(island.market.sellDepth),
     },
     productionParams: {
       baseRate: new Map(island.productionParams.baseRate),
@@ -795,10 +1038,34 @@ function cloneIsland(island: IslandState): IslandState {
         { ...building },
       ])
     ),
+    // Economic Model V2: Clone treasury fields
+    treasury: island.treasury,
+    treasuryIncome: island.treasuryIncome,
+    treasuryExpenses: island.treasuryExpenses,
+    cumulativeExportRevenue: island.cumulativeExportRevenue,
+    cumulativeImportCosts: island.cumulativeImportCosts,
+    // Economic Model V2: Clone production shocks
+    productionShocks: new Map(
+      Array.from(island.productionShocks?.entries() ?? []).map(([goodId, shock]) => [
+        goodId,
+        { ...shock },
+      ])
+    ),
   };
 }
 
 function cloneShip(ship: ShipState): ShipState {
+  // Clone lastKnownPrices Map with deep copy of PriceKnowledge entries
+  const clonedLastKnownPrices = new Map(
+    Array.from(ship.lastKnownPrices?.entries() ?? []).map(([islandId, knowledge]) => [
+      islandId,
+      {
+        prices: new Map(knowledge.prices),
+        tick: knowledge.tick,
+      },
+    ])
+  );
+
   return {
     ...ship,
     cargo: new Map(ship.cargo),
@@ -813,6 +1080,14 @@ function cloneShip(ship: ShipState): ShipState {
     cumulativeTransportCosts: ship.cumulativeTransportCosts,
     lastVoyageCost: ship.lastVoyageCost,
     crew: { ...ship.crew },
+    spoilageLossThisVoyage: new Map(ship.spoilageLossThisVoyage),
+    cumulativeSpoilageLoss: ship.cumulativeSpoilageLoss,
+    lastKnownPrices: clonedLastKnownPrices,
+    // Credit/Debt System (Economic Model V2)
+    debt: ship.debt ?? 0,
+    creditLimit: ship.creditLimit ?? 0,
+    interestRate: ship.interestRate ?? 0,
+    cumulativeInterestPaid: ship.cumulativeInterestPaid ?? 0,
   };
 }
 

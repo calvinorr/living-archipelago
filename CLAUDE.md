@@ -93,6 +93,19 @@ Next.js + React + Zustand + Recharts + TailwindCSS
 GEMINI_API_KEY=your-key  # Required for AI agents
 ```
 
+## Documentation
+
+**Primary References**:
+- `ECONOMIC_MODEL.md` - Single source of truth for economic model (implementation status, formulas, config, roadmap)
+- `CLAUDE.md` - This file, project structure and commands
+
+**Ignore**:
+- `docs/archive/` - Superseded documentation, do not reference or update
+- Old economic docs were consolidated into ECONOMIC_MODEL.md
+
+**Implementation Details**:
+- `docs/implementation-plans/` - Detailed specs for specific tracks (secondary to ECONOMIC_MODEL.md)
+
 ## Type System Essentials
 
 - 5 goods: Fish, Grain, Timber, Tools, Luxuries

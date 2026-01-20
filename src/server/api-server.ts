@@ -19,6 +19,7 @@ import { createDatabase, SimulationDatabase, getTradeStats, getLLMUsage, getEcos
 import type { TradeRecord } from '../storage/index.js';
 import { getRunSummary, getEcosystemReports, getMarketEfficiencyMetrics, getTradeRouteAnalysis } from '../storage/analyst-queries.js';
 import { EconomicAnalyst } from '../analyst/analyst-agent.js';
+import { loadOverrides, addOverride, removeOverride, clearOverrides, applyOverridesToConfig, getOverridesPath } from '../config/overrides.js';
 
 // Global analyst instance
 let analyst: EconomicAnalyst | null = null;
@@ -87,13 +88,14 @@ const DB_PATH = process.env.DB_PATH || 'simulation.db';
 const DB_ENABLED = process.env.DB_ENABLED !== 'false';
 const DB_SNAPSHOT_INTERVAL = parseInt(process.env.DB_SNAPSHOT_INTERVAL || '10', 10);
 
-const state: ServerState = {
+const state: ServerState & { llmModel: string } = {
   status: 'stopped',
   simulation: null,
   agentManager: null,
   timeScale: 1,
   tickInterval: null,
   llmEnabled: false,
+  llmModel: process.env.LLM_MODEL || 'gemini-1.5-flash-8b', // Cheapest by default
   database: null,
   priceHistory: [],
 };
@@ -112,7 +114,13 @@ function initializeSimulation(): void {
   const seed = parseInt(process.env.SEED || '12345', 10);
   const initialState = initializeWorld(seed);
 
-  state.simulation = new Simulation(initialState, { seed });
+  // Build config with overrides applied
+  // We need to cast through unknown because applyOverridesToConfig mutates the object
+  const configObj = { ...DEFAULT_CONFIG, seed } as unknown as Record<string, unknown>;
+  applyOverridesToConfig(configObj);
+  const config = configObj as unknown as typeof DEFAULT_CONFIG & { seed: number };
+
+  state.simulation = new Simulation(initialState, config);
   state.priceHistory = [];
 
   // Initialize database if enabled
@@ -125,7 +133,7 @@ function initializeSimulation(): void {
 
   // Start a new database run
   if (state.database) {
-    const runId = state.database.startRun(seed, { ...DEFAULT_CONFIG, seed });
+    const runId = state.database.startRun(seed, config);
     console.log(`[Database] Started run ${runId}`);
   }
 
@@ -140,8 +148,8 @@ function initializeSimulation(): void {
     const triggerConfig = { maxTicksWithoutReasoning: 10, priceDivergenceThreshold: 0.1 };
 
     if (state.llmEnabled && HAS_API_KEY) {
-      console.log('[Server] Using real Gemini LLM');
-      const llmClient = new LLMClient();
+      console.log(`[Server] Using real Gemini LLM (model: ${state.llmModel})`);
+      const llmClient = new LLMClient({ model: state.llmModel });
       agent = new TraderAgent('trader-alpha', 'Alpha Trader', llmClient, {
         cash: initialCash,
         shipIds,
@@ -398,7 +406,7 @@ function broadcast(message: object): void {
 function handleRequest(req: IncomingMessage, res: ServerResponse): void {
   // CORS headers
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') {
@@ -594,8 +602,53 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
         duration,
       };
     });
+    const currentRunId = state.database.getCurrentRunId();
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ runs: summaries }));
+    res.end(JSON.stringify({ runs: summaries, currentRunId }));
+    return;
+  }
+
+  // Delete all runs except current (DELETE)
+  if (url.pathname === '/api/analyst/runs' && req.method === 'DELETE') {
+    if (!state.database) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Database not enabled' }));
+      return;
+    }
+
+    const currentRunId = state.database.getCurrentRunId();
+    const runs = state.database.getAllRuns();
+    const runsToDelete = runs.filter(r => r.id !== currentRunId);
+
+    if (runsToDelete.length === 0) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, deleted: 0, message: 'No runs to delete' }));
+      return;
+    }
+
+    try {
+      const db = state.database.getDb();
+      let deleted = 0;
+
+      for (const run of runsToDelete) {
+        db.prepare('DELETE FROM prices WHERE snapshot_id IN (SELECT id FROM snapshots WHERE run_id = ?)').run(run.id);
+        db.prepare('DELETE FROM island_metrics WHERE snapshot_id IN (SELECT id FROM snapshots WHERE run_id = ?)').run(run.id);
+        db.prepare('DELETE FROM snapshots WHERE run_id = ?').run(run.id);
+        db.prepare('DELETE FROM trades WHERE run_id = ?').run(run.id);
+        db.prepare('DELETE FROM llm_calls WHERE run_id = ?').run(run.id);
+        db.prepare('DELETE FROM events WHERE run_id = ?').run(run.id);
+        db.prepare('DELETE FROM runs WHERE id = ?').run(run.id);
+        deleted++;
+      }
+
+      console.log(`[Database] Deleted ${deleted} runs (kept current run ${currentRunId})`);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, deleted, message: `Deleted ${deleted} runs` }));
+    } catch (error) {
+      console.error('[Database] Delete all error:', error);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Failed to delete runs' }));
+    }
     return;
   }
 
@@ -789,11 +842,21 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
     });
     req.on('end', () => {
       try {
-        const { configPath, newValue } = JSON.parse(body);
+        let { configPath, newValue } = JSON.parse(body);
         if (!configPath || newValue === undefined) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ error: 'configPath and newValue are required' }));
           return;
+        }
+
+        // Normalize config path - strip invalid prefixes that LLM sometimes adds
+        const invalidPrefixes = ['Market.', 'Transport.', 'Population.', 'Consumption.', 'Production.', 'Ecosystem.', 'Config.', 'config.'];
+        for (const prefix of invalidPrefixes) {
+          if (configPath.startsWith(prefix)) {
+            console.log(`[Analyst] Stripping invalid prefix "${prefix}" from config path: ${configPath}`);
+            configPath = configPath.slice(prefix.length);
+            break;
+          }
         }
 
         // Apply to running simulation if active
@@ -811,13 +874,22 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
               }
             }
 
+            // Persist to overrides file for future restarts
+            const saved = addOverride({
+              path: configPath,
+              oldValue,
+              newValue,
+              source: `analyst-run-${state.database?.getCurrentRunId() ?? 'unknown'}`,
+            });
+
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
               success: true,
               configPath,
               oldValue,
               newValue,
-              message: `Config updated: ${configPath} changed from ${JSON.stringify(oldValue)} to ${JSON.stringify(newValue)}. Changes take effect immediately.`,
+              persisted: saved,
+              message: `Config updated: ${configPath} changed from ${JSON.stringify(oldValue)} to ${JSON.stringify(newValue)}. ${saved ? 'Persisted to config file - will survive restarts.' : 'Applied to current session only.'}`,
             }));
           } else {
             res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -872,6 +944,273 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
       console.error('[Database] Delete error:', error);
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: 'Failed to delete run' }));
+    }
+    return;
+  }
+
+  // ============================================================================
+  // Config Overrides Endpoints
+  // ============================================================================
+
+  // Get all config overrides
+  if (url.pathname === '/api/config/overrides' && req.method === 'GET') {
+    const data = loadOverrides();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ...data,
+      filePath: getOverridesPath(),
+    }));
+    return;
+  }
+
+  // Clear all overrides (reset to defaults)
+  if (url.pathname === '/api/config/overrides' && req.method === 'DELETE') {
+    const success = clearOverrides();
+    if (success) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        success: true,
+        message: 'All config overrides cleared. Restart server to apply default config.',
+      }));
+    } else {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Failed to clear overrides' }));
+    }
+    return;
+  }
+
+  // Remove a specific override
+  if (url.pathname === '/api/config/overrides/remove' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (chunk) => {
+      body += chunk.toString();
+    });
+    req.on('end', () => {
+      try {
+        const { path } = JSON.parse(body);
+        if (!path) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'path is required' }));
+          return;
+        }
+
+        const success = removeOverride(path);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success,
+          message: success
+            ? `Override for ${path} removed. Restart server to apply.`
+            : `No override found for ${path}`,
+        }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+      }
+    });
+    return;
+  }
+
+  // ============================================================================
+  // Admin Endpoints
+  // ============================================================================
+
+  // Get LLM metrics and recent calls
+  if (url.pathname === '/api/admin/llm' && req.method === 'GET') {
+    const summary = llmMetrics.getSummary();
+    const agentStats = state.agentManager?.getAllAgents().map(agent => {
+      if ('getStats' in agent && typeof agent.getStats === 'function') {
+        const stats = (agent as TraderAgent).getStats();
+        return {
+          id: agent.id,
+          name: agent.name,
+          type: agent.type,
+          llmCalls: stats.llmCalls,
+          rateLimiter: stats.rateLimiterStatus,
+        };
+      }
+      return { id: agent.id, name: agent.name, type: agent.type };
+    }) ?? [];
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      summary,
+      agents: agentStats,
+      llmEnabled: state.llmEnabled,
+    }));
+    return;
+  }
+
+  // Get agent diagnostics
+  if (url.pathname === '/api/admin/agents' && req.method === 'GET') {
+    const agents = state.agentManager?.getAllAgents().map(agent => {
+      const memory = agent.getMemory();
+      let traderStats = null;
+
+      if ('getStats' in agent && typeof agent.getStats === 'function') {
+        traderStats = (agent as TraderAgent).getStats();
+      }
+
+      return {
+        id: agent.id,
+        name: agent.name,
+        type: agent.type,
+        memory: {
+          lastReasoningTick: memory.lastReasoningTick,
+          currentPlan: memory.currentPlan,
+          recentDecisions: memory.recentDecisions.slice(-10),
+        },
+        traderStats,
+      };
+    }) ?? [];
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      agents,
+      tick: state.simulation?.getTick() ?? 0,
+    }));
+    return;
+  }
+
+  // Get current active config
+  if (url.pathname === '/api/admin/config' && req.method === 'GET') {
+    const config = state.simulation?.getConfig() ?? null;
+    const overrides = loadOverrides();
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      activeConfig: config,
+      overrides,
+    }));
+    return;
+  }
+
+  // Get server status and diagnostics
+  if (url.pathname === '/api/admin/status' && req.method === 'GET') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: state.status,
+      tick: state.simulation?.getTick() ?? 0,
+      runId: state.database?.getCurrentRunId() ?? null,
+      timeScale: state.timeScale,
+      llmEnabled: state.llmEnabled,
+      llmModel: state.llmModel,
+      availableModels: [
+        { id: 'gemini-1.5-flash-8b', name: 'Gemini 1.5 Flash 8B', cost: '$0.0375/$0.15 per 1M tokens', recommended: true },
+        { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', cost: '$0.075/$0.30 per 1M tokens' },
+        { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', cost: '$0.10/$0.40 per 1M tokens' },
+      ],
+      dbEnabled: DB_ENABLED,
+      connectedClients: clients.size,
+      uptime: process.uptime(),
+    }));
+    return;
+  }
+
+  // Change LLM model
+  if (url.pathname === '/api/admin/model' && req.method === 'POST') {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk.toString(); });
+    req.on('end', () => {
+      try {
+        const { model } = JSON.parse(body);
+        const validModels = ['gemini-1.5-flash-8b', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'];
+
+        if (!validModels.includes(model)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: `Invalid model. Choose from: ${validModels.join(', ')}` }));
+          return;
+        }
+
+        const oldModel = state.llmModel;
+        state.llmModel = model;
+
+        // If LLM is enabled, need to reinitialize agent with new model
+        if (state.llmEnabled && state.simulation && ENABLE_AGENTS) {
+          const wasRunning = state.status === 'running';
+          if (wasRunning) pauseSimulation();
+
+          // Reinitialize with new model
+          const worldState = state.simulation.getState();
+          state.agentManager = new AgentManager({ debug: false });
+
+          const shipIds = Array.from(worldState.ships.values()).filter(s => s.ownerId === 'trader-alpha').map(s => s.id);
+          const initialCash = 1000;
+          const triggerConfig = { maxTicksWithoutReasoning: 10, priceDivergenceThreshold: 0.1 };
+
+          console.log(`[Server] Switching LLM model: ${oldModel} → ${model}`);
+          const llmClient = new LLMClient({ model: state.llmModel });
+          const agent = new TraderAgent('trader-alpha', 'Alpha Trader', llmClient, {
+            cash: initialCash,
+            shipIds,
+          }, { triggerConfig, debug: true });
+
+          state.agentManager.registerAgent(agent, worldState);
+          llmMetrics.reset();
+
+          if (wasRunning) resumeSimulation();
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: true,
+          oldModel,
+          newModel: model,
+          message: `Model changed to ${model}`
+        }));
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON' }));
+      }
+    });
+    return;
+  }
+
+  // Reset simulation (POST) - starts a new run with current config
+  if (url.pathname === '/api/simulation/reset' && req.method === 'POST') {
+    try {
+      // Stop current simulation if running
+      if (state.tickInterval) {
+        clearInterval(state.tickInterval);
+        state.tickInterval = null;
+      }
+      state.status = 'paused';
+
+      // Get old run ID for reference
+      const oldRunId = state.database?.getCurrentRunId();
+
+      // Re-initialize simulation with current config (includes applied overrides)
+      initializeSimulation();
+
+      // Get new run ID
+      const newRunId = state.database?.getCurrentRunId();
+
+      // Broadcast reset to all clients
+      broadcast({
+        type: 'simulation_reset',
+        data: { oldRunId, newRunId },
+      });
+
+      // Send new state to all clients
+      if (state.simulation) {
+        broadcast({
+          type: 'state',
+          data: serializeWorldState(state.simulation.getState()),
+        });
+      }
+
+      console.log(`[Server] Simulation reset: run ${oldRunId} → run ${newRunId}`);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        success: true,
+        oldRunId,
+        newRunId,
+        message: `Simulation reset. New run #${newRunId} started with current config.`,
+      }));
+    } catch (error) {
+      console.error('[Server] Reset failed:', error);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Failed to reset simulation' }));
     }
     return;
   }

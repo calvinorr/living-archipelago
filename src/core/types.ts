@@ -99,11 +99,30 @@ export interface PopulationState {
 // Market State (Section 2.2)
 // ============================================================================
 
+/**
+ * Market depth configuration (Economic Model V2)
+ * Controls price impact and liquidity for large trades
+ */
+export interface MarketDepthConfig {
+  /** Base market depth as multiplier of ideal stock */
+  baseDepthMultiplier: number; // e.g., 0.5 = 50% of ideal stock
+  /** Price impact coefficient (higher = more impact per unit) */
+  priceImpactCoefficient: number; // e.g., 0.01
+  /** Minimum depth floor (never go below this) */
+  minDepth: number; // e.g., 10 units
+  /** Recovery rate - how fast depth regenerates per tick */
+  depthRecoveryRate: number; // e.g., 0.1 = 10% per tick
+}
+
 export interface MarketState {
   prices: Map<GoodId, number>;
   idealStock: Map<GoodId, number>; // tuning knob per island
   momentum: Map<GoodId, number>; // for smoothing price change
   consumptionVelocity: Map<GoodId, number>; // recent consumption rate
+  /** Available depth for buying (how much can be bought before major price impact) */
+  buyDepth: Map<GoodId, number>;
+  /** Available depth for selling (how much can be sold before major price impact) */
+  sellDepth: Map<GoodId, number>;
 }
 
 // ============================================================================
@@ -131,6 +150,15 @@ export interface IslandState {
   market: MarketState;
   productionParams: ProductionParams;
   buildings: Map<BuildingId, Building>;
+  // Economic Model V2: Island Treasury System
+  treasury: number; // Island's cash reserves
+  treasuryIncome: number; // Income this tick (from exports)
+  treasuryExpenses: number; // Expenses this tick (from imports)
+  cumulativeExportRevenue: number; // Total earned from selling to ships
+  cumulativeImportCosts: number; // Total spent buying from ships
+  // Economic Model V2: Supply Volatility - Production Shocks
+  /** Active production modifiers from supply shocks (boom/bust events) */
+  productionShocks: Map<GoodId, ProductionShock>;
 }
 
 // ============================================================================
@@ -195,6 +223,15 @@ export interface MaintenanceConfig {
   sinkingChancePerTick: number; // Chance of sinking per tick when critical (e.g., 0.001)
 }
 
+/**
+ * Price knowledge entry for an island
+ * Stores the prices a ship knew when it last visited
+ */
+export interface PriceKnowledge {
+  prices: Map<GoodId, number>;
+  tick: number; // When the prices were observed
+}
+
 export interface ShipState {
   id: ShipId;
   name: string;
@@ -209,6 +246,21 @@ export interface ShipState {
   crew: CrewState; // Ship crew state
   condition: number; // 0-1, ship hull/equipment condition (Track 08)
   totalDistanceTraveled: number; // Cumulative distance for wear calculation
+  // Spoilage tracking (Economic Model V2)
+  spoilageLossThisVoyage: Map<GoodId, number>; // Cargo lost to spoilage on current voyage
+  cumulativeSpoilageLoss: number; // Total value lost to spoilage (estimated)
+  // Price Discovery Lag (Economic Model V2)
+  /** Last known prices at each island (updated when ship visits) */
+  lastKnownPrices: Map<IslandId, PriceKnowledge>;
+  // Credit/Debt System (Economic Model V2)
+  /** Current debt owed (positive = has debt, zero = debt-free) */
+  debt: number;
+  /** Maximum credit line based on ship value */
+  creditLimit: number;
+  /** Interest rate per tick on outstanding debt */
+  interestRate: number;
+  /** Cumulative interest paid over ship lifetime */
+  cumulativeInterestPaid: number;
 }
 
 /**
@@ -292,6 +344,8 @@ export interface GameTime {
 export interface EconomyMetrics {
   taxCollectedThisTick: number; // Tax collected in current tick
   totalTaxCollected: number; // Cumulative tax collected (currency destroyed)
+  taxRedistributedThisTick: number; // Tax redistributed to islands this tick
+  totalTaxRedistributed: number; // Cumulative tax redistributed to islands
 }
 
 export interface WorldState {
@@ -383,8 +437,72 @@ export interface SimulationConfig {
   // Fish Migration System
   fishMigrationConfig: FishMigrationConfig;
 
+  // Operating Costs System (Economic Model V2)
+  operatingCostsConfig: OperatingCostsConfig;
+
+  // Credit/Debt System (Economic Model V2)
+  creditConfig: CreditConfig;
+
   // Transaction Tax (currency sink)
   transactionTaxRate: number; // Tax rate on trades (0.04 = 4%)
+
+  // Island Economy System (Economic Model V2)
+  islandEconomyConfig: IslandEconomyConfig;
+
+  // Market Depth System (Economic Model V2)
+  marketDepthConfig: MarketDepthConfig;
+
+  // Supply Volatility System (Economic Model V2)
+  supplyVolatilityConfig: SupplyVolatilityConfig;
+}
+
+/**
+ * Island economy configuration (Economic Model V2)
+ * Controls how islands manage money and purchasing power
+ */
+export interface IslandEconomyConfig {
+  enabled: boolean; // Enable/disable island treasury system
+  baseTreasuryPerPop: number; // Starting treasury per population (e.g., 10)
+  importBudgetRatio: number; // Max fraction of treasury for imports per tick (e.g., 0.1 = 10%)
+  minTreasuryRatio: number; // Keep this ratio as emergency reserve (e.g., 0.2 = 20%)
+  taxRedistributionRate: number; // Fraction of collected tax redistributed to islands (e.g., 0.5)
+  productionValueRate: number; // Value generated per unit produced (for internal economy)
+}
+
+/**
+ * Supply volatility configuration (Economic Model V2)
+ * Controls production variance and supply shocks
+ *
+ * Random variance makes each playthrough slightly different.
+ * Shocks create trading opportunities (buy from boom islands, avoid bust islands).
+ * Bust chance slightly higher than boom creates slight deflationary pressure.
+ * Shocks are temporary - economy self-corrects.
+ */
+export interface SupplyVolatilityConfig {
+  /** Base production variance (0.1 = +/-10% random variance) */
+  baseVariance: number;
+  /** Chance of positive shock per tick per island per good */
+  boomChance: number; // e.g., 0.001 = 0.1% per tick
+  /** Chance of negative shock per tick per island per good */
+  bustChance: number; // e.g., 0.002 = 0.2% per tick
+  /** Boom multiplier on production */
+  boomMultiplier: number; // e.g., 1.5 = 50% more production
+  /** Bust multiplier on production */
+  bustMultiplier: number; // e.g., 0.5 = 50% less production
+  /** How many ticks shocks last */
+  shockDuration: number; // e.g., 24 = 1 day
+}
+
+/**
+ * Active production shock on an island for a specific good
+ */
+export interface ProductionShock {
+  /** Production multiplier (>1 for boom, <1 for bust) */
+  multiplier: number;
+  /** Tick when the shock expires */
+  expiresAtTick: number;
+  /** Type of shock for UI/logging */
+  type: 'boom' | 'bust';
 }
 
 /**
@@ -396,6 +514,36 @@ export interface FishMigrationConfig {
   healthyThreshold: number; // Fish stock ratio above which fish can receive migrants (0.6)
   migrationRate: number; // Max fraction of fish stock that can migrate per tick (0.02 = 2%)
   minMigrationAmount: number; // Minimum fish amount to trigger migration (5)
+}
+
+/**
+ * Operating costs configuration (Economic Model V2)
+ * Controls ship operating expenses: crew wages, maintenance, and port fees
+ * These costs create realistic pressure on traders and prevent idle ships
+ */
+export interface OperatingCostsConfig {
+  crewWageMultiplier: number; // Multiplier for crew wages (1.0 = normal wages based on crew.wageRate)
+  maintenanceRate: number; // Cost per capacity unit per tick (e.g., 0.01 = 1 coin per 100 capacity per tick)
+  portFeePerTick: number; // Flat fee charged when docked at an island (e.g., 1.0)
+  unpaidWagesMoraleThreshold: number; // Ticks without wage payment before morale drops (e.g., 24)
+}
+
+/**
+ * Credit/debt system configuration (Economic Model V2)
+ * Allows ships to borrow funds when running low on cash
+ * Creates financial management dimension to trading
+ */
+export interface CreditConfig {
+  /** Base credit as multiplier of ship capacity value (e.g., 2.0 = 2x ship capacity in credit) */
+  baseCreditMultiplier: number;
+  /** Interest rate per tick on outstanding debt (e.g., 0.001 = 0.1% per tick) */
+  interestRatePerTick: number;
+  /** Minimum cash before auto-borrowing kicks in (e.g., 50) */
+  minCashThreshold: number;
+  /** Maximum debt-to-value ratio before credit is cut off (e.g., 0.8 = 80% of ship value) */
+  maxDebtRatio: number;
+  /** Base value per capacity unit for credit calculation (e.g., 10) */
+  baseValuePerCapacity: number;
 }
 
 /**

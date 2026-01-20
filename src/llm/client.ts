@@ -20,9 +20,19 @@ export interface LLMClientConfig {
   temperature?: number;
 }
 
+/**
+ * Available Gemini models (cheapest to most expensive)
+ */
+export const GEMINI_MODELS = {
+  'gemini-1.5-flash-8b': 'Cheapest - good for simple JSON tasks',
+  'gemini-1.5-flash': 'Balanced - fast and capable',
+  'gemini-2.0-flash': 'Latest - best quality',
+  'gemini-1.5-pro': 'Most capable - expensive',
+} as const;
+
 const DEFAULT_CONFIG: Required<LLMClientConfig> = {
   apiKey: '',
-  model: 'gemini-2.0-flash',
+  model: 'gemini-1.5-flash-8b', // Use cheapest model by default
   maxOutputTokens: 1024,
   temperature: 0.7,
 };
@@ -185,6 +195,7 @@ export class LLMError extends Error {
 
 /**
  * Create a mock LLM client for testing
+ * Records metrics just like the real client so Admin page shows activity
  */
 export function createMockLLMClient(
   responses: Map<string, string> | ((prompt: string) => string)
@@ -193,12 +204,44 @@ export function createMockLLMClient(
   const mock = {
     callCount: 0,
     async complete(prompt: string): Promise<LLMResponse> {
+      const startTime = Date.now();
       mock.callCount++;
+
+      // Simulate a small delay (5-50ms)
+      await new Promise(resolve => setTimeout(resolve, 5 + Math.random() * 45));
+
       const text =
         typeof responses === 'function'
           ? responses(prompt)
           : responses.get(prompt) ?? '{"error": "no mock response"}';
-      return { text, finishReason: 'STOP' };
+
+      const latencyMs = Date.now() - startTime;
+
+      // Estimate token counts (rough: ~4 chars per token)
+      const inputTokens = Math.ceil(prompt.length / 4);
+      const outputTokens = Math.ceil(text.length / 4);
+
+      // Record metrics so Admin page shows mock calls
+      llmMetrics.record({
+        timestamp: Date.now(),
+        model: 'mock-llm',
+        promptSummary: prompt.slice(0, 100),
+        inputTokens,
+        outputTokens,
+        totalTokens: inputTokens + outputTokens,
+        latencyMs,
+        finishReason: 'STOP',
+      });
+
+      return {
+        text,
+        finishReason: 'STOP',
+        tokenCount: {
+          prompt: inputTokens,
+          response: outputTokens,
+          total: inputTokens + outputTokens,
+        },
+      };
     },
     async completeJSON<T>(prompt: string): Promise<T> {
       const response = await mock.complete(prompt);

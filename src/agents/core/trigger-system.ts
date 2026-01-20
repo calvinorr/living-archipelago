@@ -97,6 +97,8 @@ export interface TriggerConfig {
   priceDivergenceThreshold: number;
   /** Maximum ticks without reasoning before forced re-evaluation */
   maxTicksWithoutReasoning: number;
+  /** Minimum ticks between LLM reasoning (cooldown) */
+  minTicksBetweenReasoning: number;
   /** Goods to track for price divergence */
   trackedGoods: GoodId[];
   /** Minimum priority to trigger reasoning */
@@ -107,10 +109,11 @@ export interface TriggerConfig {
  * Default trigger configuration
  */
 export const DEFAULT_TRIGGER_CONFIG: TriggerConfig = {
-  priceDivergenceThreshold: 0.3, // 30% price difference
+  priceDivergenceThreshold: 0.5, // 50% price difference (was 30%)
   maxTicksWithoutReasoning: 60, // Force reasoning every ~2.5 days
+  minTicksBetweenReasoning: 20, // Cooldown: wait 20 ticks (~1 day) between LLM calls
   trackedGoods: ['fish', 'grain', 'timber', 'tools'],
-  minTriggerPriority: 3,
+  minTriggerPriority: 5, // Raised from 3 to reduce sensitivity
 };
 
 /**
@@ -148,6 +151,12 @@ export class TriggerSystem {
    * Check if agent should trigger reasoning based on current triggers
    */
   shouldTrigger(observation: ObservableState, memory: AgentMemory): boolean {
+    // Cooldown check: don't trigger if we reasoned recently
+    const ticksSinceReasoning = observation.tick - memory.lastReasoningTick;
+    if (ticksSinceReasoning < this.config.minTicksBetweenReasoning) {
+      return false;
+    }
+
     const triggers = this.evaluate(observation, memory);
     return triggers.length > 0 && triggers[0].priority >= this.config.minTriggerPriority;
   }

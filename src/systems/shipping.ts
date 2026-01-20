@@ -16,6 +16,7 @@ import type {
   ShippingCostConfig,
   SimulationConfig,
   IslandId,
+  PriceKnowledge,
 } from '../core/types.js';
 
 import { getWarehouseEffect } from './buildings.js';
@@ -295,6 +296,67 @@ export function checkShipSinking(
 }
 
 /**
+ * Update ship's price knowledge when visiting an island
+ * Called when a ship arrives at (or is at) an island
+ *
+ * @param ship - The ship to update
+ * @param island - The island being visited
+ * @param currentTick - Current simulation tick
+ * @returns Updated ship state with new price knowledge
+ */
+export function updateShipPriceKnowledge(
+  ship: ShipState,
+  island: IslandState,
+  currentTick: number
+): ShipState {
+  // Clone the existing price knowledge map
+  const newLastKnownPrices = new Map(ship.lastKnownPrices);
+
+  // Create new price knowledge for this island
+  const priceKnowledge: PriceKnowledge = {
+    prices: new Map(island.market.prices),
+    tick: currentTick,
+  };
+
+  newLastKnownPrices.set(island.id, priceKnowledge);
+
+  return {
+    ...ship,
+    lastKnownPrices: newLastKnownPrices,
+  };
+}
+
+/**
+ * Get the age of price knowledge for an island (in ticks)
+ * Returns -1 if no price knowledge exists
+ */
+export function getPriceAge(
+  ship: ShipState,
+  islandId: IslandId,
+  currentTick: number
+): number {
+  const knowledge = ship.lastKnownPrices?.get(islandId);
+  if (!knowledge) {
+    return -1; // No knowledge
+  }
+  return currentTick - knowledge.tick;
+}
+
+/**
+ * Check if price knowledge is stale (older than threshold)
+ * Default threshold is 24 ticks (1 game day)
+ */
+export function isPriceKnowledgeStale(
+  ship: ShipState,
+  islandId: IslandId,
+  currentTick: number,
+  staleThreshold: number = 24
+): boolean {
+  const age = getPriceAge(ship, islandId, currentTick);
+  return age < 0 || age > staleThreshold;
+}
+
+/**
  * Apply spoilage to perishable cargo
  * Formula: cargo_{t+1} = cargo_t * exp(-spoilage_rate * dt * weather_multiplier * warehouse_multiplier)
  *
@@ -473,7 +535,8 @@ export function startVoyage(
 }
 
 /**
- * Update ship state including movement, spoilage, transport costs (Track 02), and wear (Track 08)
+ * Update ship state including movement, spoilage, transport costs (Track 02), wear (Track 08),
+ * and price knowledge (Price Discovery Lag)
  */
 export function updateShip(
   ship: ShipState,
@@ -481,7 +544,8 @@ export function updateShip(
   goods: Map<GoodId, GoodDefinition>,
   events: WorldEvent[],
   dt: number,
-  config?: SimulationConfig
+  config?: SimulationConfig,
+  currentTick?: number
 ): {
   newShip: ShipState;
   arrived: boolean;
@@ -489,6 +553,7 @@ export function updateShip(
   spoilageLoss: Map<GoodId, number>;
   transportCost: number;
   wearApplied: number;
+  spoilageValue: number;
 } {
   // Calculate warehouse spoilage reduction if ship is at an island with warehouses
   let warehouseMultiplier = 1;
@@ -502,6 +567,15 @@ export function updateShip(
 
   // Apply spoilage to cargo (reduced by warehouse if at island)
   const { newCargo, spoilageLoss } = applySpoilage(ship.cargo, goods, events, dt, warehouseMultiplier);
+
+  // Calculate spoilage value (estimate using average prices)
+  let spoilageValue = 0;
+  for (const [goodId, lostQty] of spoilageLoss) {
+    const goodDef = goods.get(goodId);
+    if (goodDef) {
+      spoilageValue += lostQty * goodDef.basePrice;
+    }
+  }
 
   // Update movement (now returns distance traveled)
   const { newLocation, arrived, distanceTraveled } = updateShipMovement(
@@ -519,6 +593,14 @@ export function updateShip(
   let condition = ship.condition;
   let totalDistanceTraveled = ship.totalDistanceTraveled;
   let wearApplied = 0;
+
+  // Track spoilage for this voyage
+  const spoilageLossThisVoyage = new Map(ship.spoilageLossThisVoyage);
+  for (const [goodId, lostQty] of spoilageLoss) {
+    const existing = spoilageLossThisVoyage.get(goodId) ?? 0;
+    spoilageLossThisVoyage.set(goodId, existing + lostQty);
+  }
+  let cumulativeSpoilageLoss = ship.cumulativeSpoilageLoss + spoilageValue;
 
   // Apply wear only when at sea (Track 08)
   if (ship.location.kind === 'at_sea' && config) {
@@ -547,6 +629,25 @@ export function updateShip(
     cash = Math.max(0, cash - transportCost); // Prevent negative cash
   }
 
+  // Reset voyage spoilage tracking when arriving at island (voyage complete)
+  const finalSpoilageLossThisVoyage = arrived
+    ? new Map<GoodId, number>()
+    : spoilageLossThisVoyage;
+
+  // Update price knowledge when arriving at island (Price Discovery Lag)
+  let lastKnownPrices = ship.lastKnownPrices ?? new Map();
+  if (arrived && newLocation.kind === 'at_island') {
+    const arrivedIsland = islands.get(newLocation.islandId);
+    if (arrivedIsland) {
+      // Clone and update price knowledge
+      lastKnownPrices = new Map(lastKnownPrices);
+      lastKnownPrices.set(newLocation.islandId, {
+        prices: new Map(arrivedIsland.market.prices),
+        tick: currentTick ?? 0,
+      });
+    }
+  }
+
   const newShip: ShipState = {
     ...ship,
     cargo: newCargo,
@@ -556,12 +657,15 @@ export function updateShip(
     cumulativeTransportCosts,
     condition,
     totalDistanceTraveled,
+    spoilageLossThisVoyage: finalSpoilageLossThisVoyage,
+    cumulativeSpoilageLoss,
+    lastKnownPrices,
   };
 
   const arrivedAt =
     arrived && newLocation.kind === 'at_island' ? newLocation.islandId : null;
 
-  return { newShip, arrived, arrivedAt, spoilageLoss, transportCost, wearApplied };
+  return { newShip, arrived, arrivedAt, spoilageLoss, transportCost, wearApplied, spoilageValue };
 }
 
 /**
