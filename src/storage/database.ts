@@ -14,6 +14,7 @@ import type {
   ShipId,
 } from '../core/types.js';
 import type { LLMCallRecord } from '../llm/metrics.js';
+import type { RunAnalysis } from '../analyst/analyst-agent.js';
 import { hashState } from '../core/rng.js';
 
 // ============================================================================
@@ -144,6 +145,55 @@ CREATE INDEX IF NOT EXISTS idx_trades_run_tick ON trades(run_id, tick);
 CREATE INDEX IF NOT EXISTS idx_llm_calls_run ON llm_calls(run_id);
 CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id);
 CREATE INDEX IF NOT EXISTS idx_events_run_tick ON events(run_id, tick);
+
+-- Analysis runs (one per analyst.analyzeRun() call)
+CREATE TABLE IF NOT EXISTS analysis_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL,
+  analyzed_at TEXT NOT NULL DEFAULT (datetime('now')),
+  health_score REAL NOT NULL,
+  health_explanation TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL,
+  raw_response TEXT,
+  FOREIGN KEY (run_id) REFERENCES runs(id)
+);
+
+-- Analysis findings (issues detected)
+CREATE TABLE IF NOT EXISTS analysis_findings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  analysis_run_id INTEGER NOT NULL,
+  severity TEXT NOT NULL CHECK(severity IN ('critical', 'warning', 'info')),
+  category TEXT NOT NULL,
+  description TEXT NOT NULL,
+  evidence TEXT NOT NULL,
+  FOREIGN KEY (analysis_run_id) REFERENCES analysis_runs(id)
+);
+
+-- Analysis recommendations
+CREATE TABLE IF NOT EXISTS analysis_recommendations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  analysis_run_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  config_path TEXT NOT NULL,
+  current_value TEXT NOT NULL,
+  suggested_value TEXT NOT NULL,
+  rationale TEXT NOT NULL,
+  expected_impact TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'applied', 'rejected', 'superseded')),
+  applied_at TEXT,
+  applied_run_id INTEGER,
+  impact_verified INTEGER DEFAULT 0,
+  impact_notes TEXT,
+  FOREIGN KEY (analysis_run_id) REFERENCES analysis_runs(id),
+  FOREIGN KEY (applied_run_id) REFERENCES runs(id)
+);
+
+-- Indexes for analysis tables
+CREATE INDEX IF NOT EXISTS idx_analysis_runs_run ON analysis_runs(run_id);
+CREATE INDEX IF NOT EXISTS idx_analysis_findings_run ON analysis_findings(analysis_run_id);
+CREATE INDEX IF NOT EXISTS idx_analysis_recommendations_run ON analysis_recommendations(analysis_run_id);
+CREATE INDEX IF NOT EXISTS idx_analysis_recommendations_status ON analysis_recommendations(status);
 `;
 
 // ============================================================================
@@ -167,6 +217,9 @@ export class SimulationDatabase {
   private stmtInsertTrade: Database.Statement | null = null;
   private stmtInsertLLMCall: Database.Statement | null = null;
   private stmtInsertEvent: Database.Statement | null = null;
+  private stmtInsertAnalysisRun: Database.Statement | null = null;
+  private stmtInsertFinding: Database.Statement | null = null;
+  private stmtInsertRecommendation: Database.Statement | null = null;
 
   /**
    * Create a new SimulationDatabase
@@ -226,6 +279,22 @@ export class SimulationDatabase {
     this.stmtInsertEvent = this.db.prepare(`
       INSERT INTO events (run_id, tick, event_type, target_id, start_tick, end_tick, data)
       VALUES (?, ?, ?, ?, ?, ?, ?)
+    `);
+
+    this.stmtInsertAnalysisRun = this.db.prepare(`
+      INSERT INTO analysis_runs (run_id, health_score, health_explanation, summary, raw_response)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+
+    this.stmtInsertFinding = this.db.prepare(`
+      INSERT INTO analysis_findings (analysis_run_id, severity, category, description, evidence)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+
+    this.stmtInsertRecommendation = this.db.prepare(`
+      INSERT INTO analysis_recommendations
+      (analysis_run_id, title, config_path, current_value, suggested_value, rationale, expected_impact, confidence)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `);
   }
 
@@ -499,6 +568,307 @@ export class SimulationDatabase {
     });
 
     insertEvents(events);
+  }
+
+  // ============================================================================
+  // Analysis Recording
+  // ============================================================================
+
+  /**
+   * Record an analysis result with all findings and recommendations
+   * @param runId The simulation run that was analyzed
+   * @param analysis The analysis result from the analyst agent
+   * @returns The analysis_run ID
+   */
+  recordAnalysis(runId: number, analysis: RunAnalysis): number {
+    const insertAnalysis = this.db.transaction(() => {
+      // Insert main analysis record
+      const result = this.stmtInsertAnalysisRun!.run(
+        runId,
+        analysis.healthScore,
+        '', // healthExplanation not in RunAnalysis type
+        analysis.summary,
+        analysis.rawResponse || null
+      );
+      const analysisRunId = result.lastInsertRowid as number;
+
+      // Insert issues as findings
+      for (const issue of analysis.issues) {
+        this.stmtInsertFinding!.run(
+          analysisRunId,
+          issue.severity,
+          issue.category,
+          issue.description,
+          JSON.stringify(issue.evidence)
+        );
+      }
+
+      // Insert recommendations
+      for (const rec of analysis.recommendations) {
+        this.stmtInsertRecommendation!.run(
+          analysisRunId,
+          rec.title,
+          rec.configPath,
+          JSON.stringify(rec.currentValue),
+          JSON.stringify(rec.suggestedValue),
+          rec.rationale,
+          rec.expectedImpact,
+          rec.confidence
+        );
+      }
+
+      return analysisRunId;
+    });
+
+    return insertAnalysis();
+  }
+
+  /**
+   * Mark a recommendation as applied
+   * @param recommendationId The recommendation ID
+   * @param appliedRunId The run where it was applied
+   */
+  markRecommendationApplied(recommendationId: number, appliedRunId: number): void {
+    const stmt = this.db.prepare(`
+      UPDATE analysis_recommendations
+      SET status = 'applied', applied_at = datetime('now'), applied_run_id = ?
+      WHERE id = ?
+    `);
+    stmt.run(appliedRunId, recommendationId);
+  }
+
+  /**
+   * Update recommendation impact tracking
+   * @param recommendationId The recommendation ID
+   * @param verified Whether the expected impact was observed
+   * @param notes Notes about the impact
+   */
+  updateRecommendationImpact(recommendationId: number, verified: boolean, notes: string): void {
+    const stmt = this.db.prepare(`
+      UPDATE analysis_recommendations
+      SET impact_verified = ?, impact_notes = ?
+      WHERE id = ?
+    `);
+    stmt.run(verified ? 1 : 0, notes, recommendationId);
+  }
+
+  /**
+   * Get analysis history (most recent first)
+   */
+  getAnalysisHistory(limit: number = 20): Array<{
+    id: number;
+    runId: number;
+    analyzedAt: Date;
+    healthScore: number;
+    summary: string;
+    issueCount: number;
+    recommendationCount: number;
+  }> {
+    const stmt = this.db.prepare(`
+      SELECT
+        ar.id,
+        ar.run_id,
+        ar.analyzed_at,
+        ar.health_score,
+        ar.summary,
+        (SELECT COUNT(*) FROM analysis_findings WHERE analysis_run_id = ar.id) as issue_count,
+        (SELECT COUNT(*) FROM analysis_recommendations WHERE analysis_run_id = ar.id) as recommendation_count
+      FROM analysis_runs ar
+      ORDER BY ar.analyzed_at DESC
+      LIMIT ?
+    `);
+
+    const rows = stmt.all(limit) as Array<{
+      id: number;
+      run_id: number;
+      analyzed_at: string;
+      health_score: number;
+      summary: string;
+      issue_count: number;
+      recommendation_count: number;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      runId: row.run_id,
+      analyzedAt: new Date(row.analyzed_at),
+      healthScore: row.health_score,
+      summary: row.summary,
+      issueCount: row.issue_count,
+      recommendationCount: row.recommendation_count,
+    }));
+  }
+
+  /**
+   * Get pending recommendations (not yet applied)
+   */
+  getPendingRecommendations(): Array<{
+    id: number;
+    analysisRunId: number;
+    runId: number;
+    title: string;
+    configPath: string;
+    currentValue: unknown;
+    suggestedValue: unknown;
+    rationale: string;
+    expectedImpact: string;
+    confidence: number;
+    analyzedAt: Date;
+  }> {
+    const stmt = this.db.prepare(`
+      SELECT
+        r.id,
+        r.analysis_run_id,
+        ar.run_id,
+        r.title,
+        r.config_path,
+        r.current_value,
+        r.suggested_value,
+        r.rationale,
+        r.expected_impact,
+        r.confidence,
+        ar.analyzed_at
+      FROM analysis_recommendations r
+      JOIN analysis_runs ar ON r.analysis_run_id = ar.id
+      WHERE r.status = 'pending'
+      ORDER BY ar.analyzed_at DESC, r.confidence DESC
+    `);
+
+    const rows = stmt.all() as Array<{
+      id: number;
+      analysis_run_id: number;
+      run_id: number;
+      title: string;
+      config_path: string;
+      current_value: string;
+      suggested_value: string;
+      rationale: string;
+      expected_impact: string;
+      confidence: number;
+      analyzed_at: string;
+    }>;
+
+    return rows.map((row) => ({
+      id: row.id,
+      analysisRunId: row.analysis_run_id,
+      runId: row.run_id,
+      title: row.title,
+      configPath: row.config_path,
+      currentValue: JSON.parse(row.current_value),
+      suggestedValue: JSON.parse(row.suggested_value),
+      rationale: row.rationale,
+      expectedImpact: row.expected_impact,
+      confidence: row.confidence,
+      analyzedAt: new Date(row.analyzed_at),
+    }));
+  }
+
+  /**
+   * Get full analysis details including issues and recommendations
+   */
+  getAnalysisDetails(analysisRunId: number): {
+    analysis: {
+      id: number;
+      runId: number;
+      analyzedAt: Date;
+      healthScore: number;
+      summary: string;
+    };
+    issues: Array<{
+      id: number;
+      severity: string;
+      category: string;
+      description: string;
+      evidence: string[];
+    }>;
+    recommendations: Array<{
+      id: number;
+      title: string;
+      configPath: string;
+      currentValue: unknown;
+      suggestedValue: unknown;
+      rationale: string;
+      expectedImpact: string;
+      confidence: number;
+      status: string;
+      appliedAt: Date | null;
+    }>;
+  } | null {
+    // Get main analysis
+    const analysisStmt = this.db.prepare(`
+      SELECT id, run_id, analyzed_at, health_score, summary
+      FROM analysis_runs WHERE id = ?
+    `);
+    const analysisRow = analysisStmt.get(analysisRunId) as {
+      id: number;
+      run_id: number;
+      analyzed_at: string;
+      health_score: number;
+      summary: string;
+    } | undefined;
+
+    if (!analysisRow) return null;
+
+    // Get issues
+    const issuesStmt = this.db.prepare(`
+      SELECT id, severity, category, description, evidence
+      FROM analysis_findings WHERE analysis_run_id = ?
+    `);
+    const issueRows = issuesStmt.all(analysisRunId) as Array<{
+      id: number;
+      severity: string;
+      category: string;
+      description: string;
+      evidence: string;
+    }>;
+
+    // Get recommendations
+    const recsStmt = this.db.prepare(`
+      SELECT id, title, config_path, current_value, suggested_value,
+             rationale, expected_impact, confidence, status, applied_at
+      FROM analysis_recommendations WHERE analysis_run_id = ?
+    `);
+    const recRows = recsStmt.all(analysisRunId) as Array<{
+      id: number;
+      title: string;
+      config_path: string;
+      current_value: string;
+      suggested_value: string;
+      rationale: string;
+      expected_impact: string;
+      confidence: number;
+      status: string;
+      applied_at: string | null;
+    }>;
+
+    return {
+      analysis: {
+        id: analysisRow.id,
+        runId: analysisRow.run_id,
+        analyzedAt: new Date(analysisRow.analyzed_at),
+        healthScore: analysisRow.health_score,
+        summary: analysisRow.summary,
+      },
+      issues: issueRows.map((row) => ({
+        id: row.id,
+        severity: row.severity,
+        category: row.category,
+        description: row.description,
+        evidence: JSON.parse(row.evidence),
+      })),
+      recommendations: recRows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        configPath: row.config_path,
+        currentValue: JSON.parse(row.current_value),
+        suggestedValue: JSON.parse(row.suggested_value),
+        rationale: row.rationale,
+        expectedImpact: row.expected_impact,
+        confidence: row.confidence,
+        status: row.status,
+        appliedAt: row.applied_at ? new Date(row.applied_at) : null,
+      })),
+    };
   }
 
   // ============================================================================

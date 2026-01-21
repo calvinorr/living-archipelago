@@ -7,6 +7,7 @@ import { createDatabase, type SimulationDatabase } from '../../storage/index.js'
 import type { TradeRecord } from '../../storage/index.js';
 import type { WorldState, WorldEvent, SimulationConfig } from '../../core/types.js';
 import type { LLMCallRecord } from '../../llm/metrics.js';
+import type { RunAnalysis } from '../../analyst/analyst-agent.js';
 import { state, config } from '../state.js';
 
 /**
@@ -95,4 +96,47 @@ export function recordLLMCall(tick: number, record: LLMCallRecord): void {
  */
 export function getDatabase(): SimulationDatabase | null {
   return state.database;
+}
+
+/**
+ * Record an analysis result
+ */
+export function recordAnalysis(runId: number, analysis: RunAnalysis): number | null {
+  if (!state.database) return null;
+  return state.database.recordAnalysis(runId, analysis);
+}
+
+/**
+ * Mark a recommendation as applied
+ */
+export function markRecommendationApplied(recommendationId: number): void {
+  if (!state.database) return;
+  const runId = state.database.getCurrentRunId();
+  if (runId) {
+    state.database.markRecommendationApplied(recommendationId, runId);
+  }
+}
+
+/**
+ * Get analysis history
+ */
+export function getAnalysisHistory(limit: number = 20) {
+  if (!state.database) return [];
+  return state.database.getAnalysisHistory(limit);
+}
+
+/**
+ * Get pending recommendations
+ */
+export function getPendingRecommendations() {
+  if (!state.database) return [];
+  return state.database.getPendingRecommendations();
+}
+
+/**
+ * Get analysis details
+ */
+export function getAnalysisDetails(analysisRunId: number) {
+  if (!state.database) return null;
+  return state.database.getAnalysisDetails(analysisRunId);
 }

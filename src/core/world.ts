@@ -196,10 +196,10 @@ export const DEFAULT_CREDIT_CONFIG: CreditConfig = {
  * - Trading 100 units (200% of depth): ~30% price impact (quadratic penalty)
  */
 export const DEFAULT_MARKET_DEPTH_CONFIG: MarketDepthConfig = {
-  baseDepthMultiplier: 0.5, // Depth = 50% of ideal stock
-  priceImpactCoefficient: 0.1, // 10% max impact when consuming full depth
-  minDepth: 10, // Always have at least 10 units of depth
-  depthRecoveryRate: 0.1, // Recover 10% of missing depth per tick
+  baseDepthMultiplier: 0.8, // Depth = 80% of ideal stock (more liquid markets)
+  priceImpactCoefficient: 0.08, // Slightly reduced impact
+  minDepth: 15, // Higher floor
+  depthRecoveryRate: 0.08, // Slightly slower recovery
 };
 
 /**
@@ -390,7 +390,7 @@ export const MVP_GOODS: GoodDefinition[] = [
     name: 'Fish',
     category: 'food',
     basePrice: 8,
-    spoilageRatePerHour: 0.02, // ~2% per hour
+    spoilageRatePerHour: 0.035, // ~3.5% per hour (fish is highly perishable)
     bulkiness: 1,
   },
   {
@@ -565,10 +565,10 @@ function createProductionParams(
   switch (archetype) {
     case 'fishing':
       // Shoalhold needs 30 food/hr
-      // Fish production: 25/hr (83% of needs) - main export
+      // Fish production: 18/hr (60% of needs) - main export but not self-sufficient
       // Grain production: 3/hr (10% of needs) - must import
-      // Total local: 28/hr - slight deficit requires grain imports
-      baseRate.set('fish', 25);   // Main specialty - can export surplus
+      // Total local: 21/hr - significant deficit requires trade
+      baseRate.set('fish', 18);   // Main specialty - reduced to create trade pressure
       baseRate.set('grain', 3);   // Minimal local farming
       baseRate.set('timber', 1);  // Very limited forestry
       baseRate.set('tools', 0.5);
@@ -643,7 +643,7 @@ export function createMVPIslands(goods: GoodDefinition[]): Map<IslandId, IslandS
     },
     ecosystemParams: {
       fishCapacity: 1000,
-      fishRegenRate: 0.05,
+      fishRegenRate: 0.025, // Reduced: slower ecosystem recovery
       forestCapacity: 200,
       forestRegenRate: 0.02,
       soilRegenBase: 0.005,
@@ -680,7 +680,7 @@ export function createMVPIslands(goods: GoodDefinition[]): Map<IslandId, IslandS
     },
     ecosystemParams: {
       fishCapacity: 300,
-      fishRegenRate: 0.03,
+      fishRegenRate: 0.015, // Reduced: slower ecosystem recovery
       forestCapacity: 300,
       forestRegenRate: 0.025,
       soilRegenBase: 0.01,
@@ -717,7 +717,7 @@ export function createMVPIslands(goods: GoodDefinition[]): Map<IslandId, IslandS
     },
     ecosystemParams: {
       fishCapacity: 200,
-      fishRegenRate: 0.02,
+      fishRegenRate: 0.01, // Reduced: slower ecosystem recovery
       forestCapacity: 1000,
       forestRegenRate: 0.04,
       soilRegenBase: 0.008,

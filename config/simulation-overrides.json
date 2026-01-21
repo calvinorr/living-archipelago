@@ -24,13 +24,6 @@
       "appliedAt": "2026-01-20T16:33:07.658Z"
     },
     {
-      "path": "priceLambda",
-      "oldValue": 0.2,
-      "newValue": 0.4,
-      "source": "analyst-run-35",
-      "appliedAt": "2026-01-20T16:34:48.044Z"
-    },
-    {
       "path": "transactionTaxRate",
       "oldValue": 0.001,
       "newValue": 0.02,

@@ -18,6 +18,13 @@ import {
 } from '../../storage/analyst-queries.js';
 import { EconomicAnalyst } from '../../analyst/analyst-agent.js';
 import { addOverride } from '../../config/overrides.js';
+import {
+  recordAnalysis,
+  getAnalysisHistory,
+  getPendingRecommendations,
+  getAnalysisDetails,
+  markRecommendationApplied,
+} from '../services/DatabaseService.js';
 
 // Global analyst instance
 let analyst: EconomicAnalyst | null = null;
@@ -219,8 +226,15 @@ export function registerAnalystRoutes(router: Router): void {
           return;
         }
 
+        // Persist analysis to database for feedback loop
+        const analysisRunId = recordAnalysis(runId, analysis);
+        if (analysisRunId) {
+          console.log(`[Analyst] Persisted analysis ${analysisRunId} for run ${runId}`);
+        }
+
         sendJson(res, 200, {
           runId: analysis.runId,
+          analysisRunId,
           analyzedAt: analysis.analyzedAt.toISOString(),
           healthScore: analysis.healthScore,
           issues: analysis.issues,
@@ -369,5 +383,108 @@ export function registerAnalystRoutes(router: Router): void {
       console.error('[Database] Delete error:', error);
       sendError(res, 500, 'Failed to delete run');
     }
+  });
+
+  // ============================================================================
+  // Analysis History & Feedback Loop Endpoints
+  // ============================================================================
+
+  // Get analysis history (most recent first)
+  router.add('GET', '/api/analyst/history', (_req, res) => {
+    if (!requireDb(state.database, res)) return;
+
+    const history = getAnalysisHistory(20);
+    sendJson(res, 200, { analyses: history });
+  });
+
+  // Get full analysis details by analysis ID
+  router.addParam('GET', '/api/analyst/analyses/:analysisId', (_req, res, params) => {
+    if (!requireDb(state.database, res)) return;
+
+    const analysisId = parseRunId(params.analysisId);
+    if (analysisId === null) {
+      sendError(res, 400, 'Invalid analysis ID');
+      return;
+    }
+
+    const details = getAnalysisDetails(analysisId);
+    if (!details) {
+      sendError(res, 404, 'Analysis not found');
+      return;
+    }
+
+    sendJson(res, 200, details);
+  });
+
+  // Get pending recommendations (not yet applied)
+  router.add('GET', '/api/analyst/recommendations/pending', (_req, res) => {
+    if (!requireDb(state.database, res)) return;
+
+    const recommendations = getPendingRecommendations();
+    sendJson(res, 200, { recommendations });
+  });
+
+  // Apply a specific recommendation by ID and track it
+  router.addParam('POST', '/api/analyst/recommendations/:id/apply', async (_req, res, params) => {
+    if (!requireDb(state.database, res)) return;
+
+    const recommendationId = parseRunId(params.id);
+    if (recommendationId === null) {
+      sendError(res, 400, 'Invalid recommendation ID');
+      return;
+    }
+
+    // Get the recommendation details
+    const pending = getPendingRecommendations();
+    const rec = pending.find((r) => r.id === recommendationId);
+
+    if (!rec) {
+      sendError(res, 404, 'Recommendation not found or already applied');
+      return;
+    }
+
+    // Apply to running simulation
+    if (!state.simulation) {
+      sendError(res, 400, 'No simulation running');
+      return;
+    }
+
+    const oldConfig = state.simulation.getConfig();
+    const success = state.simulation.updateConfigPath(rec.configPath, rec.suggestedValue);
+
+    if (!success) {
+      sendError(res, 400, `Invalid config path: ${rec.configPath}`);
+      return;
+    }
+
+    // Get old value for response
+    const parts = rec.configPath.split('.');
+    let oldValue: unknown = oldConfig;
+    for (const part of parts) {
+      if (oldValue && typeof oldValue === 'object') {
+        oldValue = (oldValue as Record<string, unknown>)[part];
+      }
+    }
+
+    // Persist to overrides file
+    const saved = addOverride({
+      path: rec.configPath,
+      oldValue,
+      newValue: rec.suggestedValue,
+      source: `analyst-recommendation-${recommendationId}`,
+    });
+
+    // Mark recommendation as applied in database
+    markRecommendationApplied(recommendationId);
+
+    sendJson(res, 200, {
+      success: true,
+      recommendationId,
+      configPath: rec.configPath,
+      oldValue,
+      newValue: rec.suggestedValue,
+      persisted: saved,
+      message: `Applied recommendation: ${rec.title}`,
+    });
   });
 }
