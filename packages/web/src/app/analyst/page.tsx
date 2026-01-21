@@ -1,14 +1,19 @@
 'use client';
 
+import { useState } from 'react';
 import { useAnalyst } from '@/hooks/useAnalyst';
 import { Navigation } from '@/components/layout/Navigation';
 import { RunSelectorDropdown } from '@/components/analyst/RunSelectorDropdown';
 import { AnalysisReport } from '@/components/analyst/AnalysisReport';
 import { AnalystChat } from '@/components/analyst/AnalystChat';
 import { ImprovementQueue } from '@/components/analyst/ImprovementQueue';
+import { AnalysisHistory } from '@/components/analyst/AnalysisHistory';
+
+type ViewTab = 'current' | 'history';
 
 export default function AnalystPage() {
   const { error, clearError } = useAnalyst();
+  const [activeTab, setActiveTab] = useState<ViewTab>('current');
 
   return (
     <div className="h-screen flex flex-col p-4">
@@ -30,6 +35,30 @@ export default function AnalystPage() {
             <span className="text-muted-foreground">/</span>
             <RunSelectorDropdown />
           </div>
+
+          {/* View Tabs */}
+          <div className="flex items-center bg-muted/50 rounded-md p-0.5">
+            <button
+              onClick={() => setActiveTab('current')}
+              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                activeTab === 'current'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              Current
+            </button>
+            <button
+              onClick={() => setActiveTab('history')}
+              className={`px-3 py-1.5 text-xs font-medium rounded transition-colors ${
+                activeTab === 'history'
+                  ? 'bg-primary text-primary-foreground'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              History
+            </button>
+          </div>
         </div>
       </div>
 
@@ -46,23 +75,31 @@ export default function AnalystPage() {
         </div>
       )}
 
-      {/* Main Layout - Three Equal Columns */}
-      <div className="grid grid-cols-3 gap-4 flex-1 min-h-0">
-        {/* Left Column - Analysis Results */}
-        <div className="min-h-0">
-          <AnalysisReport />
-        </div>
+      {/* Main Content */}
+      {activeTab === 'current' ? (
+        /* Current Analysis - Three Equal Columns */
+        <div className="grid grid-cols-3 gap-4 flex-1 min-h-0">
+          {/* Left Column - Analysis Results */}
+          <div className="min-h-0">
+            <AnalysisReport />
+          </div>
 
-        {/* Center Column - Chat */}
-        <div className="min-h-0">
-          <AnalystChat />
-        </div>
+          {/* Center Column - Chat */}
+          <div className="min-h-0">
+            <AnalystChat />
+          </div>
 
-        {/* Right Column - Improvements */}
-        <div className="min-h-0">
-          <ImprovementQueue />
+          {/* Right Column - Improvements */}
+          <div className="min-h-0">
+            <ImprovementQueue />
+          </div>
         </div>
-      </div>
+      ) : (
+        /* History View */
+        <div className="flex-1 min-h-0">
+          <AnalysisHistory />
+        </div>
+      )}
 
       {/* Footer Info */}
       <div className="mt-4 text-center text-xs text-muted-foreground flex-shrink-0">
