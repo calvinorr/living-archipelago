@@ -11,16 +11,6 @@ import { TraderAgent } from '../../agents/traders/trader-agent.js';
 import { changeModel } from '../services/AgentService.js';
 import { pauseSimulation, resumeSimulation } from '../controllers/SimulationController.js';
 
-// Dependencies interface kept for backward compatibility with routes/index.ts
-export interface AdminDeps {
-  pauseSimulation: () => void;
-  resumeSimulation: () => void;
-}
-
-export function setAdminDeps(_d: AdminDeps): void {
-  // No longer needed - using controller directly
-}
-
 export function registerAdminRoutes(router: Router): void {
   // Get LLM metrics and recent calls
   router.add('GET', '/api/admin/llm', (_req, res) => {

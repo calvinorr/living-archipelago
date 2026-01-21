@@ -18,7 +18,7 @@ import { createRouter } from './routes/index.js';
 import { setCorsHeaders, handleCorsPreflightIfNeeded, sendError } from './utils/http.js';
 
 // Import controller and services
-import { initializeSimulation, pauseSimulation, resumeSimulation } from './controllers/SimulationController.js';
+import { initializeSimulation } from './controllers/SimulationController.js';
 import { initializeDatabase, closeDatabase, recordLLMCall } from './services/DatabaseService.js';
 
 // Import WebSocket handler
@@ -28,11 +28,7 @@ import { handleConnection } from './ws/index.js';
 // Router Setup
 // ============================================================================
 
-const router = createRouter({
-  initializeSimulation,
-  pauseSimulation,
-  resumeSimulation,
-});
+const router = createRouter();
 
 // ============================================================================
 // HTTP Server

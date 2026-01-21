@@ -5,22 +5,16 @@
 
 import { Router } from './router.js';
 import { registerHealthRoutes } from './health.js';
-import { registerSimulationRoutes, setSimulationDeps, type SimulationDeps } from './simulation.js';
+import { registerSimulationRoutes } from './simulation.js';
 import { registerDbRoutes } from './db.js';
 import { registerAnalystRoutes } from './analyst.js';
 import { registerConfigRoutes } from './config.js';
-import { registerAdminRoutes, setAdminDeps, type AdminDeps } from './admin.js';
-
-export interface RouterDeps extends SimulationDeps, AdminDeps {}
+import { registerAdminRoutes } from './admin.js';
 
 /**
  * Create and configure the main router with all routes
  */
-export function createRouter(deps: RouterDeps): Router {
-  // Inject dependencies into route modules
-  setSimulationDeps(deps);
-  setAdminDeps(deps);
-
+export function createRouter(): Router {
   const router = new Router();
 
   // Register all route modules

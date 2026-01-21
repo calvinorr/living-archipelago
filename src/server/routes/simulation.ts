@@ -9,15 +9,6 @@ import { serializeWorldState } from '../state-serializer.js';
 import { llmMetrics } from '../../llm/metrics.js';
 import { resetSimulation } from '../controllers/SimulationController.js';
 
-// Dependencies interface kept for backward compatibility with routes/index.ts
-export interface SimulationDeps {
-  initializeSimulation: () => void;
-}
-
-export function setSimulationDeps(_d: SimulationDeps): void {
-  // No longer needed - using controller directly
-}
-
 export function registerSimulationRoutes(router: Router): void {
   // Get current state
   router.add('GET', '/api/state', (_req, res) => {
