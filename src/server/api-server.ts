@@ -15,96 +15,14 @@ import { TraderAgent, createMockTraderAgent } from '../agents/traders/trader-age
 import { LLMClient } from '../llm/client.js';
 import { llmMetrics } from '../llm/metrics.js';
 import { serializeWorldState } from './state-serializer.js';
-import { createDatabase, SimulationDatabase, getTradeStats, getLLMUsage, getEcosystemHealth, getPriceHistory, getPriceVolatility, getPopulationTrends } from '../storage/index.js';
+import { createDatabase } from '../storage/index.js';
 import type { TradeRecord } from '../storage/index.js';
-import { getRunSummary, getEcosystemReports, getMarketEfficiencyMetrics, getTradeRouteAnalysis } from '../storage/analyst-queries.js';
-import { EconomicAnalyst } from '../analyst/analyst-agent.js';
-import { loadOverrides, addOverride, removeOverride, clearOverrides, applyOverridesToConfig, getOverridesPath } from '../config/overrides.js';
+import { applyOverridesToConfig } from '../config/overrides.js';
 
-// Global analyst instance
-let analyst: EconomicAnalyst | null = null;
-
-function getAnalyst(): EconomicAnalyst {
-  if (!analyst) {
-    analyst = new EconomicAnalyst({ rateLimiterPreset: 'balanced', debug: true });
-  }
-  return analyst;
-}
-
-// ============================================================================
-// Types
-// ============================================================================
-
-type SimulationStatus = 'stopped' | 'running' | 'paused';
-
-interface ServerState {
-  status: SimulationStatus;
-  simulation: Simulation | null;
-  agentManager: AgentManager | null;
-  timeScale: number;
-  tickInterval: NodeJS.Timeout | null;
-  llmEnabled: boolean;
-  database: SimulationDatabase | null;
-  priceHistory: Array<{
-    tick: number;
-    gameDay: number;
-    gameHour: number;
-    prices: Record<string, Record<string, number>>;
-  }>;
-}
-
-interface ClientMessage {
-  type: string;
-  [key: string]: unknown;
-}
-
-interface AgentDecisionEvent {
-  agentId: string;
-  agentName: string;
-  tick: number;
-  triggered: boolean;
-  triggers: string[];
-  strategy?: {
-    type: string;
-    goal: string;
-    targetRoute?: string;
-  };
-  actions: Array<{
-    type: string;
-    details: string;
-  }>;
-  reasoning?: string;
-}
-
-// ============================================================================
-// Server State
-// ============================================================================
-
-// ============================================================================
-// Database Configuration
-// ============================================================================
-
-const DB_PATH = process.env.DB_PATH || 'simulation.db';
-const DB_ENABLED = process.env.DB_ENABLED !== 'false';
-const DB_SNAPSHOT_INTERVAL = parseInt(process.env.DB_SNAPSHOT_INTERVAL || '10', 10);
-
-const state: ServerState & { llmModel: string } = {
-  status: 'stopped',
-  simulation: null,
-  agentManager: null,
-  timeScale: 1,
-  tickInterval: null,
-  llmEnabled: false,
-  llmModel: process.env.LLM_MODEL || 'gemini-1.5-flash-8b', // Cheapest by default
-  database: null,
-  priceHistory: [],
-};
-
-const clients = new Set<WebSocket>();
-
-const PORT = parseInt(process.env.PORT || '3001', 10);
-const ENABLE_AGENTS = process.env.ENABLE_AGENTS !== 'false';
-const HAS_API_KEY = !!process.env.GEMINI_API_KEY;
+// Import shared state and router
+import { state, config, clients, broadcast, type ClientMessage, type AgentDecisionEvent } from './state.js';
+import { createRouter } from './routes/index.js';
+import { setCorsHeaders, handleCorsPreflightIfNeeded, sendError } from './utils/http.js';
 
 // ============================================================================
 // Simulation Control
@@ -115,39 +33,37 @@ function initializeSimulation(): void {
   const initialState = initializeWorld(seed);
 
   // Build config with overrides applied
-  // We need to cast through unknown because applyOverridesToConfig mutates the object
   const configObj = { ...DEFAULT_CONFIG, seed } as unknown as Record<string, unknown>;
   applyOverridesToConfig(configObj);
-  const config = configObj as unknown as typeof DEFAULT_CONFIG & { seed: number };
+  const simConfig = configObj as unknown as typeof DEFAULT_CONFIG & { seed: number };
 
-  state.simulation = new Simulation(initialState, config);
+  state.simulation = new Simulation(initialState, simConfig);
   state.priceHistory = [];
 
   // Initialize database if enabled
-  if (DB_ENABLED && !state.database) {
-    state.database = createDatabase(DB_PATH, DB_SNAPSHOT_INTERVAL);
+  if (config.DB_ENABLED && !state.database) {
+    state.database = createDatabase(config.DB_PATH, config.DB_SNAPSHOT_INTERVAL);
     if (state.database) {
-      console.log(`[Database] Initialized at ${DB_PATH}`);
+      console.log(`[Database] Initialized at ${config.DB_PATH}`);
     }
   }
 
   // Start a new database run
   if (state.database) {
-    const runId = state.database.startRun(seed, config);
+    const runId = state.database.startRun(seed, simConfig);
     console.log(`[Database] Started run ${runId}`);
   }
 
-  if (ENABLE_AGENTS) {
+  if (config.ENABLE_AGENTS) {
     state.agentManager = new AgentManager({ debug: false });
 
     const shipIds = Array.from(initialState.ships.keys());
     const initialCash = 1000;
-
-    let agent: TraderAgent;
-    // Faster trigger for demo - reason every 10 ticks instead of 60
     const triggerConfig = { maxTicksWithoutReasoning: 10, priceDivergenceThreshold: 0.1 };
 
-    if (state.llmEnabled && HAS_API_KEY) {
+    let agent: TraderAgent;
+
+    if (state.llmEnabled && config.HAS_API_KEY) {
       console.log(`[Server] Using real Gemini LLM (model: ${state.llmModel})`);
       const llmClient = new LLMClient({ model: state.llmModel });
       agent = new TraderAgent('trader-alpha', 'Alpha Trader', llmClient, {
@@ -195,7 +111,6 @@ async function runTick(): Promise<void> {
     if (state.database) {
       state.database.recordSnapshot(worldState.tick, worldState);
 
-      // Record any new events
       for (const event of worldState.events) {
         if (event.startTick === worldState.tick) {
           state.database.recordEvent(worldState.tick, event);
@@ -207,14 +122,11 @@ async function runTick(): Promise<void> {
     if (state.agentManager) {
       const agentResults = await state.agentManager.processTick(worldState);
 
-      // Apply agent actions back to the simulation state
-      // This is critical - without this, trades are validated but never executed!
       if (agentResults.newWorld !== worldState) {
         state.simulation.updateState(agentResults.newWorld);
       }
 
       for (const result of agentResults.results) {
-        // Log agent activity
         if (worldState.tick % 10 === 0) {
           console.log(`[Agent] Tick ${worldState.tick}: triggered=${result.triggered}, actions=${result.actions.length}`);
         }
@@ -270,7 +182,6 @@ async function runTick(): Promise<void> {
       }
     }
 
-    // Broadcast tick
     broadcast({ type: 'tick', data: snapshot });
   } catch (error) {
     console.error('[Server] Tick error:', error);
@@ -329,23 +240,20 @@ function setSpeed(scale: number): void {
 }
 
 function setLLMEnabled(enabled: boolean): void {
-  if (!HAS_API_KEY && enabled) {
+  if (!config.HAS_API_KEY && enabled) {
     console.log('[Server] Cannot enable LLM: GEMINI_API_KEY not set');
     broadcast({ type: 'llm-status', data: { enabled: false } });
     return;
   }
 
   const wasRunning = state.status === 'running';
-
-  // Pause if running
   if (wasRunning) {
     pauseSimulation();
   }
 
   state.llmEnabled = enabled;
 
-  // Reinitialize agent with new LLM setting
-  if (state.simulation && ENABLE_AGENTS) {
+  if (state.simulation && config.ENABLE_AGENTS) {
     const worldState = state.simulation.getState();
     state.agentManager = new AgentManager({ debug: false });
 
@@ -370,15 +278,12 @@ function setLLMEnabled(enabled: boolean): void {
     }
 
     state.agentManager.registerAgent(agent, worldState);
-
-    // Reset LLM metrics when switching
     llmMetrics.reset();
   }
 
   broadcast({ type: 'llm-status', data: { enabled: state.llmEnabled } });
   broadcast({ type: 'llm-stats', data: llmMetrics.getSummary() });
 
-  // Resume if was running
   if (wasRunning) {
     resumeSimulation();
   }
@@ -387,837 +292,35 @@ function setLLMEnabled(enabled: boolean): void {
 }
 
 // ============================================================================
-// WebSocket Broadcast
+// Router Setup
 // ============================================================================
 
-function broadcast(message: object): void {
-  const data = JSON.stringify(message);
-  for (const client of clients) {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(data);
-    }
-  }
-}
+const router = createRouter({
+  initializeSimulation,
+  pauseSimulation,
+  resumeSimulation,
+});
 
 // ============================================================================
 // HTTP Server
 // ============================================================================
 
 function handleRequest(req: IncomingMessage, res: ServerResponse): void {
-  // CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  setCorsHeaders(res);
 
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
+  if (handleCorsPreflightIfNeeded(req, res)) {
     return;
   }
 
   const url = new URL(req.url || '/', `http://${req.headers.host}`);
 
-  // Health check
-  if (url.pathname === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'ok' }));
+  // Try the router first
+  if (router.handle(req, res, url.pathname)) {
     return;
   }
 
-  // Get current state
-  if (url.pathname === '/api/state' && req.method === 'GET') {
-    const snapshot = state.simulation ? serializeWorldState(state.simulation.getState()) : null;
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: state.status, world: snapshot }));
-    return;
-  }
-
-  // Get price history
-  if (url.pathname === '/api/history' && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ priceHistory: state.priceHistory }));
-    return;
-  }
-
-  // Get LLM metrics
-  if (url.pathname === '/api/llm-stats' && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ summary: llmMetrics.getSummary() }));
-    return;
-  }
-
-  // ============================================================================
-  // Database Analytics Endpoints
-  // ============================================================================
-
-  // Get database stats
-  if (url.pathname === '/api/db/stats' && req.method === 'GET') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-    const stats = state.database.getStats();
-    const runId = state.database.getCurrentRunId();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ currentRunId: runId, stats }));
-    return;
-  }
-
-  // Get all runs
-  if (url.pathname === '/api/db/runs' && req.method === 'GET') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-    const runs = state.database.getAllRuns();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ runs }));
-    return;
-  }
-
-  // Get trade stats for a run
-  if (url.pathname.startsWith('/api/db/trades/') && req.method === 'GET') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-    const runId = parseInt(url.pathname.split('/').pop() || '', 10);
-    if (isNaN(runId)) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid run ID' }));
-      return;
-    }
-    const stats = getTradeStats(state.database, runId);
-    // Convert Maps to objects for JSON serialization
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      ...stats,
-      tradesByGood: Object.fromEntries(stats.tradesByGood),
-      tradesByIsland: Object.fromEntries(stats.tradesByIsland),
-    }));
-    return;
-  }
-
-  // Get ecosystem health for a run
-  if (url.pathname.startsWith('/api/db/ecosystem/') && req.method === 'GET') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-    const runId = parseInt(url.pathname.split('/').pop() || '', 10);
-    if (isNaN(runId)) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid run ID' }));
-      return;
-    }
-    const health = getEcosystemHealth(state.database, runId);
-    // Convert Maps to objects for JSON serialization
-    const serialized = health.map(snapshot => ({
-      ...snapshot,
-      islands: Object.fromEntries(snapshot.islands),
-    }));
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ health: serialized }));
-    return;
-  }
-
-  // Get LLM usage for a run
-  if (url.pathname.startsWith('/api/db/llm/') && req.method === 'GET') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-    const runId = parseInt(url.pathname.split('/').pop() || '', 10);
-    if (isNaN(runId)) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid run ID' }));
-      return;
-    }
-    const usage = getLLMUsage(state.database, runId);
-    // Convert Maps to objects for JSON serialization
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      ...usage,
-      callsByModel: Object.fromEntries(usage.callsByModel),
-    }));
-    return;
-  }
-
-  // Get price history for a run/island/good
-  if (url.pathname === '/api/db/prices' && req.method === 'GET') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-    const runId = parseInt(url.searchParams.get('runId') || '', 10);
-    const islandId = url.searchParams.get('islandId');
-    const goodId = url.searchParams.get('goodId');
-    if (isNaN(runId) || !islandId || !goodId) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Missing runId, islandId, or goodId' }));
-      return;
-    }
-    const prices = getPriceHistory(state.database, runId, islandId, goodId);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ prices }));
-    return;
-  }
-
-  // ============================================================================
-  // Analyst API Endpoints
-  // ============================================================================
-
-  // Get all runs for analyst
-  if (url.pathname === '/api/analyst/runs' && req.method === 'GET') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-    const runs = state.database.getAllRuns();
-
-    // Get duration (max tick) for each run
-    const summaries = runs.map(run => {
-      // Query max tick for this run from snapshots
-      let duration = 0;
-      try {
-        const db = state.database!.getDb();
-        const result = db.prepare('SELECT MAX(tick) as maxTick FROM snapshots WHERE run_id = ?').get(run.id) as { maxTick: number | null } | undefined;
-        duration = result?.maxTick ?? 0;
-      } catch {
-        duration = 0;
-      }
-
-      return {
-        id: run.id,
-        seed: run.seed,
-        startedAt: run.startedAt.toISOString(),
-        endedAt: run.endedAt?.toISOString() || null,
-        duration,
-      };
-    });
-    const currentRunId = state.database.getCurrentRunId();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ runs: summaries, currentRunId }));
-    return;
-  }
-
-  // Delete all runs except current (DELETE)
-  if (url.pathname === '/api/analyst/runs' && req.method === 'DELETE') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-
-    const currentRunId = state.database.getCurrentRunId();
-    const runs = state.database.getAllRuns();
-    const runsToDelete = runs.filter(r => r.id !== currentRunId);
-
-    if (runsToDelete.length === 0) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, deleted: 0, message: 'No runs to delete' }));
-      return;
-    }
-
-    try {
-      const db = state.database.getDb();
-      let deleted = 0;
-
-      for (const run of runsToDelete) {
-        db.prepare('DELETE FROM prices WHERE snapshot_id IN (SELECT id FROM snapshots WHERE run_id = ?)').run(run.id);
-        db.prepare('DELETE FROM island_metrics WHERE snapshot_id IN (SELECT id FROM snapshots WHERE run_id = ?)').run(run.id);
-        db.prepare('DELETE FROM snapshots WHERE run_id = ?').run(run.id);
-        db.prepare('DELETE FROM trades WHERE run_id = ?').run(run.id);
-        db.prepare('DELETE FROM llm_calls WHERE run_id = ?').run(run.id);
-        db.prepare('DELETE FROM events WHERE run_id = ?').run(run.id);
-        db.prepare('DELETE FROM runs WHERE id = ?').run(run.id);
-        deleted++;
-      }
-
-      console.log(`[Database] Deleted ${deleted} runs (kept current run ${currentRunId})`);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, deleted, message: `Deleted ${deleted} runs` }));
-    } catch (error) {
-      console.error('[Database] Delete all error:', error);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Failed to delete runs' }));
-    }
-    return;
-  }
-
-  // Get run summary for analyst
-  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+\/summary$/) && req.method === 'GET') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-    const runId = parseInt(url.pathname.split('/')[4], 10);
-    const summary = getRunSummary(state.database, runId);
-    if (!summary) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Run not found' }));
-      return;
-    }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ summary }));
-    return;
-  }
-
-  // Get ecosystem reports for analyst
-  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+\/ecosystem$/) && req.method === 'GET') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-    const runId = parseInt(url.pathname.split('/')[4], 10);
-    const reports = getEcosystemReports(state.database, runId);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ reports }));
-    return;
-  }
-
-  // Get market efficiency metrics for analyst
-  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+\/market$/) && req.method === 'GET') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-    const runId = parseInt(url.pathname.split('/')[4], 10);
-    const metrics = getMarketEfficiencyMetrics(state.database, runId);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ metrics }));
-    return;
-  }
-
-  // Get trade route analysis for analyst
-  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+\/routes$/) && req.method === 'GET') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-    const runId = parseInt(url.pathname.split('/')[4], 10);
-    const routes = getTradeRouteAnalysis(state.database, runId);
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ routes }));
-    return;
-  }
-
-  // Get full analysis data for analyst
-  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+\/full$/) && req.method === 'GET') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-    const runId = parseInt(url.pathname.split('/')[4], 10);
-    const summary = getRunSummary(state.database, runId);
-    if (!summary) {
-      res.writeHead(404, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Run not found' }));
-      return;
-    }
-    const ecosystem = getEcosystemReports(state.database, runId);
-    const market = getMarketEfficiencyMetrics(state.database, runId);
-    const routes = getTradeRouteAnalysis(state.database, runId);
-    const trades = getTradeStats(state.database, runId);
-    const prices = getPriceVolatility(state.database, runId);
-    const population = getPopulationTrends(state.database, runId);
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      summary,
-      ecosystem,
-      market,
-      routes,
-      trades: {
-        ...trades,
-        tradesByGood: Object.fromEntries(trades.tradesByGood),
-        tradesByIsland: Object.fromEntries(trades.tradesByIsland),
-      },
-      prices: Object.fromEntries(prices),
-      population: Object.fromEntries(population),
-    }));
-    return;
-  }
-
-  // Analyze run with AI (POST)
-  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+\/analyze$/) && req.method === 'POST') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-    if (!HAS_API_KEY) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }));
-      return;
-    }
-
-    const runId = parseInt(url.pathname.split('/')[4], 10);
-    console.log(`[Analyst] Starting analysis for run ${runId}`);
-
-    const analystInstance = getAnalyst();
-    analystInstance.analyzeRun(state.database, runId)
-      .then((analysis) => {
-        if (!analysis) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Analysis failed' }));
-          return;
-        }
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          runId: analysis.runId,
-          analyzedAt: analysis.analyzedAt.toISOString(),
-          healthScore: analysis.healthScore,
-          issues: analysis.issues,
-          recommendations: analysis.recommendations,
-          summary: analysis.summary,
-        }));
-      })
-      .catch((error) => {
-        console.error('[Analyst] Analysis error:', error);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Analysis failed: ' + (error instanceof Error ? error.message : 'Unknown error') }));
-      });
-    return;
-  }
-
-  // Chat with analyst (POST)
-  if (url.pathname === '/api/analyst/chat' && req.method === 'POST') {
-    if (!HAS_API_KEY) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'GEMINI_API_KEY not configured' }));
-      return;
-    }
-
-    let body = '';
-    req.on('data', (chunk) => {
-      body += chunk.toString();
-    });
-    req.on('end', () => {
-      try {
-        const { message, runId } = JSON.parse(body);
-        if (!message) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'Message is required' }));
-          return;
-        }
-
-        const analystInstance = getAnalyst();
-        analystInstance.chat(message, state.database || undefined, runId)
-          .then((response) => {
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ response: response || 'No response generated' }));
-          })
-          .catch((error) => {
-            console.error('[Analyst] Chat error:', error);
-            res.writeHead(500, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: 'Chat failed' }));
-          });
-      } catch {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
-      }
-    });
-    return;
-  }
-
-  // Apply improvement (POST) - actually updates the running simulation config
-  if (url.pathname === '/api/analyst/improvements/apply' && req.method === 'POST') {
-    let body = '';
-    req.on('data', (chunk) => {
-      body += chunk.toString();
-    });
-    req.on('end', () => {
-      try {
-        let { configPath, newValue } = JSON.parse(body);
-        if (!configPath || newValue === undefined) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'configPath and newValue are required' }));
-          return;
-        }
-
-        // Normalize config path - strip invalid prefixes that LLM sometimes adds
-        const invalidPrefixes = ['Market.', 'Transport.', 'Population.', 'Consumption.', 'Production.', 'Ecosystem.', 'Config.', 'config.'];
-        for (const prefix of invalidPrefixes) {
-          if (configPath.startsWith(prefix)) {
-            console.log(`[Analyst] Stripping invalid prefix "${prefix}" from config path: ${configPath}`);
-            configPath = configPath.slice(prefix.length);
-            break;
-          }
-        }
-
-        // Apply to running simulation if active
-        if (state.simulation) {
-          const oldConfig = state.simulation.getConfig();
-          const success = state.simulation.updateConfigPath(configPath, newValue);
-
-          if (success) {
-            // Get old value for response
-            const parts = configPath.split('.');
-            let oldValue: unknown = oldConfig;
-            for (const part of parts) {
-              if (oldValue && typeof oldValue === 'object') {
-                oldValue = (oldValue as Record<string, unknown>)[part];
-              }
-            }
-
-            // Persist to overrides file for future restarts
-            const saved = addOverride({
-              path: configPath,
-              oldValue,
-              newValue,
-              source: `analyst-run-${state.database?.getCurrentRunId() ?? 'unknown'}`,
-            });
-
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({
-              success: true,
-              configPath,
-              oldValue,
-              newValue,
-              persisted: saved,
-              message: `Config updated: ${configPath} changed from ${JSON.stringify(oldValue)} to ${JSON.stringify(newValue)}. ${saved ? 'Persisted to config file - will survive restarts.' : 'Applied to current session only.'}`,
-            }));
-          } else {
-            res.writeHead(400, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ error: `Invalid config path: ${configPath}` }));
-          }
-        } else {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'No simulation running' }));
-        }
-      } catch {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
-      }
-    });
-    return;
-  }
-
-  // Delete a run (DELETE)
-  if (url.pathname.match(/^\/api\/analyst\/runs\/\d+$/) && req.method === 'DELETE') {
-    if (!state.database) {
-      res.writeHead(503, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Database not enabled' }));
-      return;
-    }
-
-    const runId = parseInt(url.pathname.split('/')[4], 10);
-
-    // Don't allow deleting the current run
-    const currentRunId = state.database.getCurrentRunId();
-    if (runId === currentRunId) {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Cannot delete the currently active run' }));
-      return;
-    }
-
-    try {
-      const db = state.database.getDb();
-
-      // Delete in order due to foreign keys
-      db.prepare('DELETE FROM prices WHERE snapshot_id IN (SELECT id FROM snapshots WHERE run_id = ?)').run(runId);
-      db.prepare('DELETE FROM island_metrics WHERE snapshot_id IN (SELECT id FROM snapshots WHERE run_id = ?)').run(runId);
-      db.prepare('DELETE FROM snapshots WHERE run_id = ?').run(runId);
-      db.prepare('DELETE FROM trades WHERE run_id = ?').run(runId);
-      db.prepare('DELETE FROM llm_calls WHERE run_id = ?').run(runId);
-      db.prepare('DELETE FROM events WHERE run_id = ?').run(runId);
-      db.prepare('DELETE FROM runs WHERE id = ?').run(runId);
-
-      console.log(`[Database] Deleted run ${runId}`);
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, message: `Run ${runId} deleted` }));
-    } catch (error) {
-      console.error('[Database] Delete error:', error);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Failed to delete run' }));
-    }
-    return;
-  }
-
-  // ============================================================================
-  // Config Overrides Endpoints
-  // ============================================================================
-
-  // Get all config overrides
-  if (url.pathname === '/api/config/overrides' && req.method === 'GET') {
-    const data = loadOverrides();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      ...data,
-      filePath: getOverridesPath(),
-    }));
-    return;
-  }
-
-  // Clear all overrides (reset to defaults)
-  if (url.pathname === '/api/config/overrides' && req.method === 'DELETE') {
-    const success = clearOverrides();
-    if (success) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        success: true,
-        message: 'All config overrides cleared. Restart server to apply default config.',
-      }));
-    } else {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Failed to clear overrides' }));
-    }
-    return;
-  }
-
-  // Remove a specific override
-  if (url.pathname === '/api/config/overrides/remove' && req.method === 'POST') {
-    let body = '';
-    req.on('data', (chunk) => {
-      body += chunk.toString();
-    });
-    req.on('end', () => {
-      try {
-        const { path } = JSON.parse(body);
-        if (!path) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'path is required' }));
-          return;
-        }
-
-        const success = removeOverride(path);
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          success,
-          message: success
-            ? `Override for ${path} removed. Restart server to apply.`
-            : `No override found for ${path}`,
-        }));
-      } catch {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON body' }));
-      }
-    });
-    return;
-  }
-
-  // ============================================================================
-  // Admin Endpoints
-  // ============================================================================
-
-  // Get LLM metrics and recent calls
-  if (url.pathname === '/api/admin/llm' && req.method === 'GET') {
-    const summary = llmMetrics.getSummary();
-    const agentStats = state.agentManager?.getAllAgents().map(agent => {
-      if ('getStats' in agent && typeof agent.getStats === 'function') {
-        const stats = (agent as TraderAgent).getStats();
-        return {
-          id: agent.id,
-          name: agent.name,
-          type: agent.type,
-          llmCalls: stats.llmCalls,
-          rateLimiter: stats.rateLimiterStatus,
-        };
-      }
-      return { id: agent.id, name: agent.name, type: agent.type };
-    }) ?? [];
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      summary,
-      agents: agentStats,
-      llmEnabled: state.llmEnabled,
-    }));
-    return;
-  }
-
-  // Get agent diagnostics
-  if (url.pathname === '/api/admin/agents' && req.method === 'GET') {
-    const agents = state.agentManager?.getAllAgents().map(agent => {
-      const memory = agent.getMemory();
-      let traderStats = null;
-
-      if ('getStats' in agent && typeof agent.getStats === 'function') {
-        traderStats = (agent as TraderAgent).getStats();
-      }
-
-      return {
-        id: agent.id,
-        name: agent.name,
-        type: agent.type,
-        memory: {
-          lastReasoningTick: memory.lastReasoningTick,
-          currentPlan: memory.currentPlan,
-          recentDecisions: memory.recentDecisions.slice(-10),
-        },
-        traderStats,
-      };
-    }) ?? [];
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      agents,
-      tick: state.simulation?.getTick() ?? 0,
-    }));
-    return;
-  }
-
-  // Get current active config
-  if (url.pathname === '/api/admin/config' && req.method === 'GET') {
-    const config = state.simulation?.getConfig() ?? null;
-    const overrides = loadOverrides();
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      activeConfig: config,
-      overrides,
-    }));
-    return;
-  }
-
-  // Get server status and diagnostics
-  if (url.pathname === '/api/admin/status' && req.method === 'GET') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      status: state.status,
-      tick: state.simulation?.getTick() ?? 0,
-      runId: state.database?.getCurrentRunId() ?? null,
-      timeScale: state.timeScale,
-      llmEnabled: state.llmEnabled,
-      llmModel: state.llmModel,
-      availableModels: [
-        { id: 'gemini-1.5-flash-8b', name: 'Gemini 1.5 Flash 8B', cost: '$0.0375/$0.15 per 1M tokens', recommended: true },
-        { id: 'gemini-1.5-flash', name: 'Gemini 1.5 Flash', cost: '$0.075/$0.30 per 1M tokens' },
-        { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', cost: '$0.10/$0.40 per 1M tokens' },
-      ],
-      dbEnabled: DB_ENABLED,
-      connectedClients: clients.size,
-      uptime: process.uptime(),
-    }));
-    return;
-  }
-
-  // Change LLM model
-  if (url.pathname === '/api/admin/model' && req.method === 'POST') {
-    let body = '';
-    req.on('data', (chunk) => { body += chunk.toString(); });
-    req.on('end', () => {
-      try {
-        const { model } = JSON.parse(body);
-        const validModels = ['gemini-1.5-flash-8b', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-1.5-pro'];
-
-        if (!validModels.includes(model)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: `Invalid model. Choose from: ${validModels.join(', ')}` }));
-          return;
-        }
-
-        const oldModel = state.llmModel;
-        state.llmModel = model;
-
-        // If LLM is enabled, need to reinitialize agent with new model
-        if (state.llmEnabled && state.simulation && ENABLE_AGENTS) {
-          const wasRunning = state.status === 'running';
-          if (wasRunning) pauseSimulation();
-
-          // Reinitialize with new model
-          const worldState = state.simulation.getState();
-          state.agentManager = new AgentManager({ debug: false });
-
-          const shipIds = Array.from(worldState.ships.values()).filter(s => s.ownerId === 'trader-alpha').map(s => s.id);
-          const initialCash = 1000;
-          const triggerConfig = { maxTicksWithoutReasoning: 10, priceDivergenceThreshold: 0.1 };
-
-          console.log(`[Server] Switching LLM model: ${oldModel} → ${model}`);
-          const llmClient = new LLMClient({ model: state.llmModel });
-          const agent = new TraderAgent('trader-alpha', 'Alpha Trader', llmClient, {
-            cash: initialCash,
-            shipIds,
-          }, { triggerConfig, debug: true });
-
-          state.agentManager.registerAgent(agent, worldState);
-          llmMetrics.reset();
-
-          if (wasRunning) resumeSimulation();
-        }
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-          success: true,
-          oldModel,
-          newModel: model,
-          message: `Model changed to ${model}`
-        }));
-      } catch {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Invalid JSON' }));
-      }
-    });
-    return;
-  }
-
-  // Reset simulation (POST) - starts a new run with current config
-  if (url.pathname === '/api/simulation/reset' && req.method === 'POST') {
-    try {
-      // Stop current simulation if running
-      if (state.tickInterval) {
-        clearInterval(state.tickInterval);
-        state.tickInterval = null;
-      }
-      state.status = 'paused';
-
-      // Get old run ID for reference
-      const oldRunId = state.database?.getCurrentRunId();
-
-      // Re-initialize simulation with current config (includes applied overrides)
-      initializeSimulation();
-
-      // Get new run ID
-      const newRunId = state.database?.getCurrentRunId();
-
-      // Broadcast reset to all clients
-      broadcast({
-        type: 'simulation_reset',
-        data: { oldRunId, newRunId },
-      });
-
-      // Send new state to all clients
-      if (state.simulation) {
-        broadcast({
-          type: 'state',
-          data: serializeWorldState(state.simulation.getState()),
-        });
-      }
-
-      console.log(`[Server] Simulation reset: run ${oldRunId} → run ${newRunId}`);
-
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({
-        success: true,
-        oldRunId,
-        newRunId,
-        message: `Simulation reset. New run #${newRunId} started with current config.`,
-      }));
-    } catch (error) {
-      console.error('[Server] Reset failed:', error);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Failed to reset simulation' }));
-    }
-    return;
-  }
-
-  // 404
-  res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ error: 'Not found' }));
+  // 404 fallback
+  sendError(res, 404, 'Not found');
 }
 
 // ============================================================================
@@ -1228,24 +331,17 @@ function handleWebSocket(ws: WebSocket): void {
   clients.add(ws);
   console.log(`[Server] Client connected (${clients.size} total)`);
 
-  // Send current status
-  ws.send(
-    JSON.stringify({
-      type: 'status',
-      data: { status: state.status === 'stopped' ? 'connected' : state.status },
-    })
-  );
+  ws.send(JSON.stringify({
+    type: 'status',
+    data: { status: state.status === 'stopped' ? 'connected' : state.status },
+  }));
 
-  // Send current state if simulation is running
   if (state.simulation) {
     const snapshot = serializeWorldState(state.simulation.getState());
     ws.send(JSON.stringify({ type: 'tick', data: snapshot }));
-
-    // Send price history
     ws.send(JSON.stringify({ type: 'history', data: { priceHistory: state.priceHistory } }));
   }
 
-  // Send LLM status and metrics
   ws.send(JSON.stringify({ type: 'llm-status', data: { enabled: state.llmEnabled } }));
   ws.send(JSON.stringify({ type: 'llm-stats', data: llmMetrics.getSummary() }));
 
@@ -1269,7 +365,6 @@ function handleWebSocket(ws: WebSocket): void {
           }
           break;
         case 'subscribe':
-          // Already subscribed to everything
           break;
         case 'set-llm':
           if (typeof message.enabled === 'boolean') {
@@ -1304,49 +399,45 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 
 wss.on('connection', handleWebSocket);
 
-// Subscribe to LLM metrics and broadcast to WebSocket clients + record to database
 llmMetrics.subscribe((record) => {
   broadcast({ type: 'llm-call', data: record });
 
-  // Record to database if enabled
   if (state.database && state.simulation) {
     const tick = state.simulation.getState().tick;
     state.database.recordLLMCall(tick, record);
   }
 });
 
-// Initialize database on startup (before simulation)
-if (DB_ENABLED) {
-  state.database = createDatabase(DB_PATH, DB_SNAPSHOT_INTERVAL);
+// Initialize database on startup
+if (config.DB_ENABLED) {
+  state.database = createDatabase(config.DB_PATH, config.DB_SNAPSHOT_INTERVAL);
   if (state.database) {
-    console.log(`[Database] Initialized at ${DB_PATH} (snapshot every ${DB_SNAPSHOT_INTERVAL} ticks)`);
+    console.log(`[Database] Initialized at ${config.DB_PATH} (snapshot every ${config.DB_SNAPSHOT_INTERVAL} ticks)`);
   }
 }
 
 // Initialize simulation on startup
 initializeSimulation();
 
-server.listen(PORT, () => {
+server.listen(config.PORT, () => {
   console.log('='.repeat(50));
   console.log('Living Archipelago API Server');
   console.log('='.repeat(50));
-  console.log(`HTTP:      http://localhost:${PORT}`);
-  console.log(`WebSocket: ws://localhost:${PORT}/ws`);
-  console.log(`Agents:    ${ENABLE_AGENTS ? 'Enabled' : 'Disabled'}`);
-  console.log(`API Key:   ${HAS_API_KEY ? 'Available' : 'Not set'}`);
+  console.log(`HTTP:      http://localhost:${config.PORT}`);
+  console.log(`WebSocket: ws://localhost:${config.PORT}/ws`);
+  console.log(`Agents:    ${config.ENABLE_AGENTS ? 'Enabled' : 'Disabled'}`);
+  console.log(`API Key:   ${config.HAS_API_KEY ? 'Available' : 'Not set'}`);
   console.log(`LLM Mode:  ${state.llmEnabled ? 'Real' : 'Mock'} (toggle via dashboard)`);
-  console.log(`Database:  ${state.database ? `${DB_PATH} (every ${DB_SNAPSHOT_INTERVAL} ticks)` : 'Disabled'}`);
+  console.log(`Database:  ${state.database ? `${config.DB_PATH} (every ${config.DB_SNAPSHOT_INTERVAL} ticks)` : 'Disabled'}`);
   console.log('='.repeat(50));
 });
 
-// Graceful shutdown
 process.on('SIGINT', () => {
   console.log('\n[Server] Shutting down...');
   if (state.tickInterval) {
     clearInterval(state.tickInterval);
   }
 
-  // End current database run and close connection
   if (state.database) {
     state.database.endRun();
     state.database.close();
