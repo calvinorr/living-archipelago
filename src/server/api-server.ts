@@ -7,27 +7,22 @@ import dotenv from 'dotenv';
 dotenv.config({ path: '.env.local' });
 
 import { createServer, IncomingMessage, ServerResponse } from 'http';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocketServer } from 'ws';
 import { llmMetrics } from '../llm/metrics.js';
-import { serializeWorldState } from './state-serializer.js';
 
 // Import shared state
-import { state, config, clients, broadcast, type ClientMessage } from './state.js';
+import { state, config, broadcast } from './state.js';
 
 // Import router
 import { createRouter } from './routes/index.js';
 import { setCorsHeaders, handleCorsPreflightIfNeeded, sendError } from './utils/http.js';
 
 // Import controller and services
-import {
-  initializeSimulation,
-  startSimulation,
-  pauseSimulation,
-  resumeSimulation,
-  setSpeed,
-  setLLMEnabled,
-} from './controllers/SimulationController.js';
+import { initializeSimulation, pauseSimulation, resumeSimulation } from './controllers/SimulationController.js';
 import { initializeDatabase, closeDatabase, recordLLMCall } from './services/DatabaseService.js';
+
+// Import WebSocket handler
+import { handleConnection } from './ws/index.js';
 
 // ============================================================================
 // Router Setup
@@ -60,80 +55,13 @@ function handleRequest(req: IncomingMessage, res: ServerResponse): void {
 }
 
 // ============================================================================
-// WebSocket Server
-// ============================================================================
-
-function handleWebSocket(ws: WebSocket): void {
-  clients.add(ws);
-  console.log(`[Server] Client connected (${clients.size} total)`);
-
-  ws.send(JSON.stringify({
-    type: 'status',
-    data: { status: state.status === 'stopped' ? 'connected' : state.status },
-  }));
-
-  if (state.simulation) {
-    const snapshot = serializeWorldState(state.simulation.getState());
-    ws.send(JSON.stringify({ type: 'tick', data: snapshot }));
-    ws.send(JSON.stringify({ type: 'history', data: { priceHistory: state.priceHistory } }));
-  }
-
-  ws.send(JSON.stringify({ type: 'llm-status', data: { enabled: state.llmEnabled } }));
-  ws.send(JSON.stringify({ type: 'llm-stats', data: llmMetrics.getSummary() }));
-
-  ws.on('message', (data) => {
-    try {
-      const message = JSON.parse(data.toString()) as ClientMessage;
-
-      switch (message.type) {
-        case 'start':
-          startSimulation();
-          break;
-        case 'pause':
-          pauseSimulation();
-          break;
-        case 'resume':
-          resumeSimulation();
-          break;
-        case 'speed':
-          if (typeof message.scale === 'number') {
-            setSpeed(message.scale);
-          }
-          break;
-        case 'subscribe':
-          break;
-        case 'set-llm':
-          if (typeof message.enabled === 'boolean') {
-            setLLMEnabled(message.enabled);
-          }
-          break;
-        default:
-          console.log('[Server] Unknown message type:', message.type);
-      }
-    } catch (error) {
-      console.error('[Server] Message parse error:', error);
-    }
-  });
-
-  ws.on('close', () => {
-    clients.delete(ws);
-    console.log(`[Server] Client disconnected (${clients.size} remaining)`);
-  });
-
-  ws.on('error', (error) => {
-    console.error('[Server] WebSocket error:', error);
-    clients.delete(ws);
-  });
-}
-
-// ============================================================================
 // Main
 // ============================================================================
 
 const server = createServer(handleRequest);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-wss.on('connection', handleWebSocket);
+wss.on('connection', handleConnection);
 
 // Subscribe to LLM metrics
 llmMetrics.subscribe((record) => {
