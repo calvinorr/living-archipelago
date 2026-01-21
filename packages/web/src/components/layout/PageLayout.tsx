@@ -4,6 +4,7 @@ import { useEffect, useState, type ReactNode } from 'react';
 import { Play, Pause, Bot, Zap } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Navigation } from './Navigation';
+import { VersionBadge } from './VersionBadge';
 import { useSimulation } from '@/hooks/useSimulation';
 import { LLMMetricsPanel } from '@/components/llm/LLMMetricsPanel';
 import { formatGameTime } from '@/lib/utils';
@@ -105,6 +106,7 @@ export function PageLayout({ children }: PageLayoutProps) {
             <div className="flex items-center gap-3">
               <h1 className="text-lg font-semibold tracking-tight">Living Archipelago</h1>
               <StatusIndicator status={status} />
+              <VersionBadge />
             </div>
             <Navigation />
           </div>

@@ -200,5 +200,7 @@ Before implementing each track:
 
 ## Related Documents
 
-- [Economic Model Review](../ECONOMIC_MODEL_REVIEW.md) - Original analysis
+- [Economic Model](../../ECONOMIC_MODEL.md) - Primary reference (single source of truth)
+- [Economic Model Review](../archive/ECONOMIC_MODEL_REVIEW.md) - Original analysis (archived)
 - [CLAUDE.md](../../CLAUDE.md) - Project overview and commands
+- [API Refactor Plan](../REFACTOR_PLAN.md) - Server decomposition plan

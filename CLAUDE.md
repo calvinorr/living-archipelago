@@ -68,9 +68,17 @@ Each system is a pure function: `(state, config) → state`
 - `simulation.ts` - Tick orchestration
 
 ### API Layer (src/server/)
-- HTTP + WebSocket server
+- HTTP + WebSocket server (currently monolithic, refactor in progress)
 - State serialization for web clients
 - Real-time event broadcast
+
+**Active Refactor:** See `docs/REFACTOR_PLAN.md` for the API server decomposition plan.
+The goal is to split the 1,359-line `api-server.ts` into focused modules:
+- `routes/` - Domain-specific route handlers (health, simulation, db, analyst, config, admin)
+- `controllers/` - SimulationController for tick lifecycle
+- `services/` - AgentService, DatabaseService
+- `ws/` - WebSocket connection handlers
+- `utils/` - HTTP helpers (sendJson, sendError, etc.)
 
 ### Web Dashboard (packages/web/)
 Next.js + React + Zustand + Recharts + TailwindCSS
@@ -98,10 +106,12 @@ GEMINI_API_KEY=your-key  # Required for AI agents
 **Primary References**:
 - `ECONOMIC_MODEL.md` - Single source of truth for economic model (implementation status, formulas, config, roadmap)
 - `CLAUDE.md` - This file, project structure and commands
+- `docs/REFACTOR_PLAN.md` - API server refactor plan (branch: `refactor/api-server-v2`)
 
 **Ignore**:
 - `docs/archive/` - Superseded documentation, do not reference or update
 - Old economic docs were consolidated into ECONOMIC_MODEL.md
+- `codexideas.md`, `codexideas-routing-plan.md` - Superseded by REFACTOR_PLAN.md
 
 **Implementation Details**:
 - `docs/implementation-plans/` - Detailed specs for specific tracks (secondary to ECONOMIC_MODEL.md)
