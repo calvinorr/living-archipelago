@@ -8,19 +8,17 @@ import { state, config, clients } from '../state.js';
 import { llmMetrics } from '../../llm/metrics.js';
 import { loadOverrides } from '../../config/overrides.js';
 import { TraderAgent } from '../../agents/traders/trader-agent.js';
-import { AgentManager } from '../../agents/core/agent-manager.js';
-import { LLMClient } from '../../llm/client.js';
+import { changeModel } from '../services/AgentService.js';
+import { pauseSimulation, resumeSimulation } from '../controllers/SimulationController.js';
 
-// Dependencies injected from api-server
+// Dependencies interface kept for backward compatibility with routes/index.ts
 export interface AdminDeps {
   pauseSimulation: () => void;
   resumeSimulation: () => void;
 }
 
-let deps: AdminDeps | null = null;
-
-export function setAdminDeps(d: AdminDeps): void {
-  deps = d;
+export function setAdminDeps(_d: AdminDeps): void {
+  // No longer needed - using controller directly
 }
 
 export function registerAdminRoutes(router: Router): void {
@@ -125,11 +123,6 @@ export function registerAdminRoutes(router: Router): void {
 
   // Change LLM model
   router.add('POST', '/api/admin/model', async (req, res) => {
-    if (!deps) {
-      sendError(res, 500, 'Admin dependencies not initialized');
-      return;
-    }
-
     const body = await parseJsonBody<{ model?: string }>(req);
     if (!body) {
       sendError(res, 400, 'Invalid JSON');
@@ -147,35 +140,15 @@ export function registerAdminRoutes(router: Router): void {
     const oldModel = state.llmModel;
     state.llmModel = model;
 
-    // If LLM is enabled, need to reinitialize agent with new model
+    // If LLM is enabled, reinitialize agent with new model
     if (state.llmEnabled && state.simulation && config.ENABLE_AGENTS) {
       const wasRunning = state.status === 'running';
-      if (wasRunning) deps.pauseSimulation();
+      if (wasRunning) pauseSimulation();
 
-      // Reinitialize with new model
-      const worldState = state.simulation.getState();
-      state.agentManager = new AgentManager({ debug: false });
+      console.log(`[Admin] Switching LLM model: ${oldModel} → ${model}`);
+      changeModel(model);
 
-      const shipIds = Array.from(worldState.ships.values())
-        .filter((s) => s.ownerId === 'trader-alpha')
-        .map((s) => s.id);
-      const initialCash = 1000;
-      const triggerConfig = { maxTicksWithoutReasoning: 10, priceDivergenceThreshold: 0.1 };
-
-      console.log(`[Server] Switching LLM model: ${oldModel} → ${model}`);
-      const llmClient = new LLMClient({ model: state.llmModel });
-      const agent = new TraderAgent(
-        'trader-alpha',
-        'Alpha Trader',
-        llmClient,
-        { cash: initialCash, shipIds },
-        { triggerConfig, debug: true }
-      );
-
-      state.agentManager.registerAgent(agent, worldState);
-      llmMetrics.reset();
-
-      if (wasRunning) deps.resumeSimulation();
+      if (wasRunning) resumeSimulation();
     }
 
     sendJson(res, 200, {

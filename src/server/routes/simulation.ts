@@ -4,19 +4,18 @@
 
 import type { Router } from './router.js';
 import { sendJson, sendError } from '../utils/http.js';
-import { state, broadcast } from '../state.js';
+import { state } from '../state.js';
 import { serializeWorldState } from '../state-serializer.js';
 import { llmMetrics } from '../../llm/metrics.js';
+import { resetSimulation } from '../controllers/SimulationController.js';
 
-// Dependencies injected from api-server
+// Dependencies interface kept for backward compatibility with routes/index.ts
 export interface SimulationDeps {
   initializeSimulation: () => void;
 }
 
-let deps: SimulationDeps | null = null;
-
-export function setSimulationDeps(d: SimulationDeps): void {
-  deps = d;
+export function setSimulationDeps(_d: SimulationDeps): void {
+  // No longer needed - using controller directly
 }
 
 export function registerSimulationRoutes(router: Router): void {
@@ -40,43 +39,8 @@ export function registerSimulationRoutes(router: Router): void {
 
   // Reset simulation
   router.add('POST', '/api/simulation/reset', (_req, res) => {
-    if (!deps) {
-      sendError(res, 500, 'Simulation dependencies not initialized');
-      return;
-    }
-
     try {
-      // Stop current simulation if running
-      if (state.tickInterval) {
-        clearInterval(state.tickInterval);
-        state.tickInterval = null;
-      }
-      state.status = 'paused';
-
-      // Get old run ID for reference
-      const oldRunId = state.database?.getCurrentRunId();
-
-      // Re-initialize simulation with current config (includes applied overrides)
-      deps.initializeSimulation();
-
-      // Get new run ID
-      const newRunId = state.database?.getCurrentRunId();
-
-      // Broadcast reset to all clients
-      broadcast({
-        type: 'simulation_reset',
-        data: { oldRunId, newRunId },
-      });
-
-      // Send new state to all clients
-      if (state.simulation) {
-        broadcast({
-          type: 'state',
-          data: serializeWorldState(state.simulation.getState()),
-        });
-      }
-
-      console.log(`[Server] Simulation reset: run ${oldRunId} → run ${newRunId}`);
+      const { oldRunId, newRunId } = resetSimulation();
 
       sendJson(res, 200, {
         success: true,
