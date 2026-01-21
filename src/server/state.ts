@@ -3,6 +3,9 @@
  * Centralized state management for the API server
  */
 
+import dotenv from 'dotenv';
+dotenv.config({ path: '.env.local' });
+
 import { WebSocket } from 'ws';
 import type { Simulation } from '../core/simulation.js';
 import type { AgentManager } from '../agents/core/agent-manager.js';
